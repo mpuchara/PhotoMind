@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
@@ -25,14 +26,24 @@ class MainActivity : AppCompatActivity() {
     private var isIndexing = false
     private var startIndexAfterPermission = false
 
+    private enum class GalleryAccess { FULL, PARTIAL, NONE }
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
-        if (hasGalleryPermission()) {
-            binding.statusText.text = "Dostęp do zdjęć przyznany."
+        val access = galleryAccess()
+        updateAccessUi()
+
+        if (access != GalleryAccess.NONE) {
+            binding.statusText.text = if (access == GalleryAccess.FULL) {
+                "Pełny dostęp przyznany."
+            } else {
+                "Dostęp do wybranych zdjęć przyznany. Możesz później dodać kolejne."
+            }
             if (startIndexAfterPermission) startIndexing()
         } else {
             binding.statusText.text = "Bez dostępu do zdjęć PhotoMind nie może zbudować indeksu."
+            showPermissionHelp()
         }
         startIndexAfterPermission = false
     }
@@ -55,6 +66,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             "Uruchom indeksowanie, aby PhotoMind nauczył się Twojej galerii."
         }
+        updateAccessUi()
 
         binding.indexButton.setOnClickListener {
             if (isIndexing) {
@@ -73,20 +85,84 @@ class MainActivity : AppCompatActivity() {
             } else false
         }
 
-        if (existing > 0) performSearch()
+        if (existing > 0 && galleryAccess() != GalleryAccess.NONE) performSearch()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::binding.isInitialized) updateAccessUi()
     }
 
     private fun ensurePermissionAndIndex() {
-        if (hasGalleryPermission()) {
-            startIndexing()
-        } else {
-            startIndexAfterPermission = true
-            permissionLauncher.launch(requiredPermissions())
+        when (galleryAccess()) {
+            GalleryAccess.FULL -> startIndexing()
+            GalleryAccess.PARTIAL -> showPartialAccessDialog()
+            GalleryAccess.NONE -> requestGalleryAccessAndIndex()
+        }
+    }
+
+    private fun showPartialAccessDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("Masz ograniczony dostęp")
+            .setMessage(
+                "PhotoMind widzi tylko zdjęcia wybrane w systemowym oknie Androida. " +
+                    "Możesz dodać kolejne zdjęcia, zmienić wybór albo ponownie zaindeksować tylko obecnie udostępnione."
+            )
+            .setPositiveButton("Dodaj / zmień zdjęcia") { _, _ ->
+                requestGalleryAccessAndIndex()
+            }
+            .setNeutralButton("Indeksuj wybrane") { _, _ ->
+                startIndexing()
+            }
+            .setNegativeButton("Anuluj", null)
+            .show()
+    }
+
+    private fun requestGalleryAccessAndIndex() {
+        startIndexAfterPermission = true
+        permissionLauncher.launch(requiredPermissions())
+    }
+
+    private fun showPermissionHelp() {
+        AlertDialog.Builder(this)
+            .setTitle("PhotoMind potrzebuje dostępu do zdjęć")
+            .setMessage(
+                "Możesz nadać dostęp do całej galerii albo tylko do wybranych zdjęć. " +
+                    "Jeśli Android nie pokazuje już okna wyboru, zmień dostęp w ustawieniach aplikacji."
+            )
+            .setPositiveButton("Ustawienia aplikacji") { _, _ ->
+                val intent = Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.fromParts("package", packageName, null)
+                )
+                startActivity(intent)
+            }
+            .setNegativeButton("Zamknij", null)
+            .show()
+    }
+
+    private fun updateAccessUi() {
+        if (isIndexing) return
+
+        when (galleryAccess()) {
+            GalleryAccess.FULL -> {
+                binding.accessText.text = "Dostęp do galerii: pełny"
+                binding.indexButton.text = "Odśwież indeks"
+            }
+            GalleryAccess.PARTIAL -> {
+                binding.accessText.text = "Dostęp do galerii: ograniczony — tylko wybrane zdjęcia"
+                binding.indexButton.text = "Dodaj / zmień zdjęcia"
+            }
+            GalleryAccess.NONE -> {
+                binding.accessText.text = "Dostęp do galerii: brak"
+                binding.indexButton.text = "Nadaj dostęp"
+                adapter.submit(emptyList())
+            }
         }
     }
 
     private fun startIndexing() {
-        if (isIndexing) return
+        if (isIndexing || galleryAccess() == GalleryAccess.NONE) return
         isIndexing = true
         binding.indexButton.text = "Zatrzymaj"
         binding.progress.visibility = View.VISIBLE
@@ -97,7 +173,11 @@ class MainActivity : AppCompatActivity() {
                 binding.progress.isIndeterminate = false
                 binding.progress.max = total.coerceAtLeast(1)
                 binding.progress.progress = 0
-                binding.statusText.text = "Indeksuję $total zdjęć lokalnie…"
+                binding.statusText.text = if (total == 0) {
+                    "Android nie udostępnia obecnie żadnych zdjęć. Dodaj zdjęcia do dostępu."
+                } else {
+                    "Indeksuję $total zdjęć lokalnie… Możesz w tym czasie wyszukiwać już zapisane zdjęcia."
+                }
             }
 
             override fun onProgress(done: Int, total: Int, indexed: Int, skipped: Int, failed: Int) = runOnUiThread {
@@ -108,13 +188,17 @@ class MainActivity : AppCompatActivity() {
 
             override fun onFinished(summary: PhotoRepository.IndexSummary) = runOnUiThread {
                 isIndexing = false
-                binding.indexButton.text = getString(R.string.index_photos)
                 binding.progress.visibility = View.GONE
+                updateAccessUi()
                 val count = repository.indexedCount()
-                binding.statusText.text = if (summary.cancelled) {
-                    "Indeksowanie zatrzymane. W indeksie: $count zdjęć."
-                } else {
-                    "Gotowe. W indeksie: $count zdjęć. Nowe: ${summary.indexed}, pominięte: ${summary.failed}."
+
+                binding.statusText.text = when {
+                    summary.errorMessage != null -> "Błąd indeksowania: ${summary.errorMessage}"
+                    summary.cancelled -> "Indeksowanie zatrzymane. Dostępnych w indeksie: $count zdjęć."
+                    galleryAccess() == GalleryAccess.PARTIAL ->
+                        "Gotowe. Dostępnych w indeksie: $count zdjęć. Masz ograniczony dostęp — użyj „Dodaj / zmień zdjęcia”, aby rozszerzyć wybór."
+                    else ->
+                        "Gotowe. W indeksie: $count zdjęć. Nowe: ${summary.indexed}, pominięte: ${summary.failed}."
                 }
                 performSearch()
             }
@@ -122,10 +206,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun performSearch() {
+        if (galleryAccess() == GalleryAccess.NONE) {
+            adapter.submit(emptyList())
+            binding.statusText.text = "Najpierw nadaj PhotoMind dostęp do zdjęć."
+            return
+        }
+
         val query = binding.searchInput.text?.toString()?.trim().orEmpty()
         if (repository.indexedCount() == 0) {
             adapter.submit(emptyList())
-            binding.statusText.text = "Indeks jest pusty — najpierw kliknij „Indeksuj zdjęcia”."
+            binding.statusText.text = "Indeks jest pusty — najpierw uruchom indeksowanie."
             return
         }
 
@@ -133,7 +223,7 @@ class MainActivity : AppCompatActivity() {
             repository.search("", null) { results ->
                 runOnUiThread {
                     adapter.submit(results)
-                    binding.statusText.text = "Ostatnio zindeksowane: ${results.size} zdjęć."
+                    binding.statusText.text = "Ostatnio dostępne: ${results.size} zdjęć."
                 }
             }
             return
@@ -142,16 +232,18 @@ class MainActivity : AppCompatActivity() {
         translator.translatePolishToEnglish(
             query = query,
             onPreparing = {
-                runOnUiThread { binding.statusText.text = "Szukam lokalnie… Przy pierwszym użyciu pobieram model PL→EN." }
+                runOnUiThread {
+                    binding.statusText.text = "Szukam lokalnie… Przy pierwszym użyciu może zostać pobrany model PL→EN."
+                }
             },
             onResult = { translated ->
                 repository.search(query, translated) { results ->
                     runOnUiThread {
                         adapter.submit(results)
                         binding.statusText.text = if (results.isEmpty()) {
-                            "Brak wyników dla „$query”. Spróbuj krótszego opisu albo dodaj własny tag."
+                            "Brak wyników dla „$query”. Spróbuj prostszych słów albo dodaj własny tag."
                         } else {
-                            "Znaleziono ${results.size} zdjęć dla „$query”."
+                            "Znaleziono ${results.size} zdjęć dla „$query”. Najtrafniejsze są na początku."
                         }
                     }
                 }
@@ -167,7 +259,7 @@ class MainActivity : AppCompatActivity() {
         }
         AlertDialog.Builder(this)
             .setTitle("Dodaj imię lub własny tag")
-            .setMessage("Długi opis nie jest potrzebny. Możesz wpisać kilka słów oddzielonych spacją lub przecinkiem.")
+            .setMessage("Możesz wpisać kilka słów oddzielonych spacją lub przecinkiem. Własne tagi mają najwyższy priorytet wyszukiwania.")
             .setView(input)
             .setNegativeButton("Anuluj", null)
             .setPositiveButton("Zapisz") { _, _ ->
@@ -190,7 +282,11 @@ class MainActivity : AppCompatActivity() {
         try {
             startActivity(intent)
         } catch (_: Exception) {
-            Toast.makeText(this, "Nie udało się otworzyć zdjęcia", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                this,
+                "Nie udało się otworzyć zdjęcia. Sprawdź, czy PhotoMind nadal ma do niego dostęp.",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 
@@ -203,15 +299,36 @@ class MainActivity : AppCompatActivity() {
         else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
     }
 
-    private fun hasGalleryPermission(): Boolean = when {
+    private fun galleryAccess(): GalleryAccess = when {
         Build.VERSION.SDK_INT >= 34 -> {
-            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED ||
-                ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED
+            when {
+                ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.READ_MEDIA_IMAGES
+                ) == PackageManager.PERMISSION_GRANTED -> GalleryAccess.FULL
+
+                ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+                ) == PackageManager.PERMISSION_GRANTED -> GalleryAccess.PARTIAL
+
+                else -> GalleryAccess.NONE
+            }
         }
-        Build.VERSION.SDK_INT >= 33 ->
-            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
-        else ->
-            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        Build.VERSION.SDK_INT >= 33 -> {
+            if (ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.READ_MEDIA_IMAGES
+                ) == PackageManager.PERMISSION_GRANTED
+            ) GalleryAccess.FULL else GalleryAccess.NONE
+        }
+        else -> {
+            if (ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.READ_EXTERNAL_STORAGE
+                ) == PackageManager.PERMISSION_GRANTED
+            ) GalleryAccess.FULL else GalleryAccess.NONE
+        }
     }
 
     override fun onDestroy() {
