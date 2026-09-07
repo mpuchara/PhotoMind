@@ -13,6 +13,9 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.PhotoMind">
         <activity
+            android:name=".PeopleActivity"
+            android:exported="false" />
+        <activity
             android:name=".MainActivity"
             android:exported="true">
             <intent-filter>
