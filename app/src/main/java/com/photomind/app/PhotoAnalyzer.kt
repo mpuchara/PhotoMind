@@ -5,6 +5,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.net.Uri
+import android.os.Build
+import android.util.Size
 import androidx.exifinterface.media.ExifInterface
 import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
@@ -23,20 +25,63 @@ class PhotoAnalyzer(private val context: Context) {
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
     fun analyze(uri: Uri): Analysis {
-        val bitmap = decodeForAnalysis(uri)
+        val bitmapResult = runCatching { loadBitmapForAnalysis(uri) }
+        if (bitmapResult.isFailure) {
+            return Analysis(
+                labels = "",
+                ocr = "",
+                complete = false,
+                error = compactError("dekodowanie", bitmapResult.exceptionOrNull())
+            )
+        }
+
+        val bitmap = bitmapResult.getOrThrow()
         try {
             val image = InputImage.fromBitmap(bitmap, 0)
-            val labels = Tasks.await(labeler.process(image))
-                .sortedByDescending { it.confidence }
-                .take(12)
-                .joinToString(" ") { it.text }
-            val ocr = Tasks.await(recognizer.process(image)).text
-                .replace(Regex("\\s+"), " ")
-                .take(5000)
-            return Analysis(labels = labels, ocr = ocr)
+
+            val labelsResult = runCatching {
+                Tasks.await(labeler.process(image))
+                    .sortedByDescending { it.confidence }
+                    .take(12)
+                    .joinToString(" ") { it.text }
+            }
+
+            val ocrResult = runCatching {
+                Tasks.await(recognizer.process(image)).text
+                    .replace(Regex("\\s+"), " ")
+                    .take(5000)
+            }
+
+            val errors = buildList {
+                labelsResult.exceptionOrNull()?.let { add(compactError("etykiety AI", it)) }
+                ocrResult.exceptionOrNull()?.let { add(compactError("OCR", it)) }
+            }
+
+            return Analysis(
+                labels = labelsResult.getOrDefault(""),
+                ocr = ocrResult.getOrDefault(""),
+                complete = errors.isEmpty(),
+                error = errors.joinToString("; ").ifBlank { null }
+            )
         } finally {
-            bitmap.recycle()
+            if (!bitmap.isRecycled) bitmap.recycle()
         }
+    }
+
+    private fun loadBitmapForAnalysis(uri: Uri): Bitmap {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val thumbnail = runCatching {
+                context.contentResolver.loadThumbnail(
+                    uri,
+                    Size(THUMBNAIL_MAX_DIMENSION, THUMBNAIL_MAX_DIMENSION),
+                    null
+                )
+            }.getOrNull()
+
+            if (thumbnail != null) return thumbnail
+        }
+
+        return decodeForAnalysis(uri)
     }
 
     private fun decodeForAnalysis(uri: Uri): Bitmap {
@@ -104,14 +149,31 @@ class PhotoAnalyzer(private val context: Context) {
         }
     }
 
+    private fun compactError(stage: String, error: Throwable?): String {
+        if (error == null) return stage
+        val type = error.javaClass.simpleName.ifBlank { "błąd" }
+        val message = error.message
+            ?.replace(Regex("\\s+"), " ")
+            ?.take(140)
+            ?.trim()
+            .orEmpty()
+        return if (message.isBlank()) "$stage: $type" else "$stage: $type — $message"
+    }
+
     fun close() {
         labeler.close()
         recognizer.close()
     }
 
-    data class Analysis(val labels: String, val ocr: String)
+    data class Analysis(
+        val labels: String,
+        val ocr: String,
+        val complete: Boolean,
+        val error: String?
+    )
 
     companion object {
+        private const val THUMBNAIL_MAX_DIMENSION = 1280
         private const val TARGET_MAX_DIMENSION = 2048
     }
 }
