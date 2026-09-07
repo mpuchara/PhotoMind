@@ -49,11 +49,11 @@ class SceneDescriber(private val context: Context) {
             return Result(description = result.description.trim())
         } catch (error: Exception) {
             val cause = unwrap(error)
+            // AICore errors such as busy/quota/background restrictions are transient in
+            // practice. The beta API's exact enum set changes between releases, so keep
+            // this resilient and simply retry GenAI failures in a later foreground session.
             if (cause is GenAiException) {
-                val retry = cause.errorCode == GenAiException.ErrorCode.BUSY ||
-                    cause.errorCode == GenAiException.ErrorCode.PER_APP_BATTERY_USE_QUOTA_EXCEEDED ||
-                    cause.errorCode == GenAiException.ErrorCode.BACKGROUND_USE_BLOCKED
-                return Result(retryLater = retry, error = compactError(cause))
+                return Result(retryLater = true, error = compactError(cause))
             }
             return Result(error = compactError(cause))
         } finally {
