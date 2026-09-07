@@ -23,12 +23,20 @@
         android:text="Znajdź zdjęcie, opisując je słowami. Zdjęcia zostają na telefonie."
         android:textAppearance="@style/TextAppearance.Material3.BodyMedium" />
 
+    <TextView
+        android:id="@+id/accessText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="Dostęp do galerii: sprawdzam…"
+        android:textAppearance="@style/TextAppearance.Material3.LabelMedium" />
+
     <com.google.android.material.textfield.TextInputLayout
         android:id="@+id/searchLayout"
         style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="18dp"
+        android:layout_marginTop="14dp"
         android:hint="Czego szukasz?">
 
         <com.google.android.material.textfield.TextInputEditText
@@ -82,6 +90,13 @@
         android:layout_marginTop="7dp"
         android:text="Najpierw zezwól na dostęp i uruchom indeksowanie."
         android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="Wskazówka: przytrzymaj zdjęcie, aby nadać własny tag lub imię osoby."
+        android:textAppearance="@style/TextAppearance.Material3.LabelSmall" />
 
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/photoGrid"
