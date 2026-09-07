@@ -40,7 +40,7 @@ dependencies {
     implementation("com.google.mlkit:image-labeling:17.0.9")
     implementation("com.google.mlkit:text-recognition:16.0.1")
     implementation("com.google.mlkit:face-detection:16.1.7")
-    implementation("com.google.mlkit:genai-prompt:1.0.0-beta4")
+    implementation("com.google.mlkit:genai-prompt:1.0.0-beta2")
 
     implementation("org.tensorflow:tensorflow-lite:2.14.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
