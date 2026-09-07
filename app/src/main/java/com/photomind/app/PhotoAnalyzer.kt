@@ -23,6 +23,7 @@ class PhotoAnalyzer(private val context: Context) {
             .build()
     )
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    private val faceEngine = FaceEngine(context)
 
     fun analyze(uri: Uri): Analysis {
         val bitmapResult = runCatching { loadBitmapForAnalysis(uri) }
@@ -31,7 +32,10 @@ class PhotoAnalyzer(private val context: Context) {
                 labels = "",
                 ocr = "",
                 complete = false,
-                error = compactError("dekodowanie", bitmapResult.exceptionOrNull())
+                error = compactError("dekodowanie", bitmapResult.exceptionOrNull()),
+                faceCount = 0,
+                faceEmbeddings = emptyList(),
+                facesComplete = false
             )
         }
 
@@ -42,7 +46,7 @@ class PhotoAnalyzer(private val context: Context) {
             val labelsResult = runCatching {
                 Tasks.await(labeler.process(image))
                     .sortedByDescending { it.confidence }
-                    .take(12)
+                    .take(16)
                     .joinToString(" ") { it.text }
             }
 
@@ -50,6 +54,15 @@ class PhotoAnalyzer(private val context: Context) {
                 Tasks.await(recognizer.process(image)).text
                     .replace(Regex("\\s+"), " ")
                     .take(5000)
+            }
+
+            val faceResult = runCatching { faceEngine.analyze(bitmap) }.getOrElse {
+                FaceEngine.Result(
+                    faceCount = 0,
+                    embeddings = emptyList(),
+                    modelReady = false,
+                    error = compactError("twarze", it)
+                )
             }
 
             val errors = buildList {
@@ -61,7 +74,12 @@ class PhotoAnalyzer(private val context: Context) {
                 labels = labelsResult.getOrDefault(""),
                 ocr = ocrResult.getOrDefault(""),
                 complete = errors.isEmpty(),
-                error = errors.joinToString("; ").ifBlank { null }
+                error = errors.joinToString("; ").ifBlank { null },
+                faceCount = faceResult.faceCount,
+                faceEmbeddings = faceResult.embeddings,
+                facesComplete = faceResult.faceCount == 0 ||
+                    (faceResult.modelReady && faceResult.embeddings.isNotEmpty()),
+                faceError = faceResult.error
             )
         } finally {
             if (!bitmap.isRecycled) bitmap.recycle()
@@ -97,9 +115,7 @@ class PhotoAnalyzer(private val context: Context) {
 
         var sampleSize = 1
         val largest = max(bounds.outWidth, bounds.outHeight)
-        while (largest / sampleSize > TARGET_MAX_DIMENSION * 2) {
-            sampleSize *= 2
-        }
+        while (largest / sampleSize > TARGET_MAX_DIMENSION * 2) sampleSize *= 2
 
         val options = BitmapFactory.Options().apply {
             inSampleSize = sampleSize
@@ -119,9 +135,7 @@ class PhotoAnalyzer(private val context: Context) {
                 (decoded.height * scale).toInt().coerceAtLeast(1),
                 true
             ).also { if (it !== decoded) decoded.recycle() }
-        } else {
-            decoded
-        }
+        } else decoded
 
         val rotation = readRotation(uri)
         if (rotation == 0) return scaled
@@ -144,9 +158,7 @@ class PhotoAnalyzer(private val context: Context) {
                     else -> 0
                 }
             } ?: 0
-        } catch (_: Exception) {
-            0
-        }
+        } catch (_: Exception) { 0 }
     }
 
     private fun compactError(stage: String, error: Throwable?): String {
@@ -163,13 +175,18 @@ class PhotoAnalyzer(private val context: Context) {
     fun close() {
         labeler.close()
         recognizer.close()
+        faceEngine.close()
     }
 
     data class Analysis(
         val labels: String,
         val ocr: String,
         val complete: Boolean,
-        val error: String?
+        val error: String?,
+        val faceCount: Int,
+        val faceEmbeddings: List<FloatArray>,
+        val facesComplete: Boolean,
+        val faceError: String? = null
     )
 
     companion object {
