@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.util.Size
+import com.google.mlkit.genai.common.DownloadCallback
 import com.google.mlkit.genai.common.FeatureStatus
 import com.google.mlkit.genai.common.GenAiException
 import com.google.mlkit.genai.imagedescription.ImageDescription
@@ -30,11 +31,34 @@ class SceneDescriber(private val context: Context) {
         val status = try {
             describer.checkFeatureStatus().get()
         } catch (error: Exception) {
-            return Result(supported = false, error = compactError(error))
+            return Result(supported = false, error = compactError(unwrap(error)))
         }
 
         if (status == FeatureStatus.UNAVAILABLE) {
             return Result(supported = false, error = "Gemini Nano Image Description nie jest dostępny na tym urządzeniu")
+        }
+
+        // Google exposes a downloadable state in addition to AVAILABLE/UNAVAILABLE.
+        // Fetch the on-device feature automatically; this is model download only, not photo upload.
+        if (status != FeatureStatus.AVAILABLE) {
+            val downloadError = arrayOfNulls<GenAiException>(1)
+            try {
+                describer.downloadFeature(
+                    object : DownloadCallback {
+                        override fun onDownloadStarted(bytesToDownload: Long) = Unit
+                        override fun onDownloadProgress(totalBytesDownloaded: Long) = Unit
+                        override fun onDownloadCompleted() = Unit
+                        override fun onDownloadFailed(e: GenAiException) {
+                            downloadError[0] = e
+                        }
+                    }
+                ).get()
+            } catch (error: Exception) {
+                return Result(retryLater = true, error = compactError(unwrap(error)))
+            }
+            downloadError[0]?.let {
+                return Result(retryLater = true, error = compactError(it))
+            }
         }
 
         val bitmap = try {
@@ -50,8 +74,8 @@ class SceneDescriber(private val context: Context) {
         } catch (error: Exception) {
             val cause = unwrap(error)
             // AICore errors such as busy/quota/background restrictions are transient in
-            // practice. The beta API's exact enum set changes between releases, so keep
-            // this resilient and simply retry GenAI failures in a later foreground session.
+            // practice. The beta API's exact enum set changes between releases, so retry
+            // GenAI failures in a later foreground session instead of binding to enum names.
             if (cause is GenAiException) {
                 return Result(retryLater = true, error = compactError(cause))
             }
