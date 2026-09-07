@@ -119,14 +119,15 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
     )
 
     fun searchScored(query: String, limit: Int = 300): List<ScoredPhoto> {
-        val tokens = SearchText.tokens(query)
-        if (tokens.isEmpty()) return recent(limit).map { ScoredPhoto(it, 0) }
+        val scoreTokens = SearchText.tokens(query)
+        if (scoreTokens.isEmpty()) return recent(limit).map { ScoredPhoto(it, 0) }
 
-        val where = tokens.joinToString(" OR ") {
+        val candidateTokens = (SearchText.rawTokens(query) + scoreTokens).distinct()
+        val where = candidateTokens.joinToString(" OR ") {
             "(LOWER(labels) LIKE ? OR LOWER(ocr) LIKE ? OR LOWER(display_name) LIKE ? OR LOWER(bucket) LIKE ? OR LOWER(user_tags) LIKE ?)"
         }
         val args = mutableListOf<String>()
-        tokens.forEach { token ->
+        candidateTokens.forEach { token ->
             repeat(5) { args += "%$token%" }
         }
         args += MAX_CANDIDATES.toString()
@@ -137,7 +138,7 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         )
 
         return candidates
-            .map { ScoredPhoto(it, SearchText.score(it, tokens)) }
+            .map { ScoredPhoto(it, SearchText.score(it, scoreTokens)) }
             .filter { it.score > 0 }
             .sortedWith(
                 compareByDescending<ScoredPhoto> { it.score }
@@ -178,6 +179,6 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
     companion object {
         private const val DB_NAME = "photomind.db"
         private const val DB_VERSION = 2
-        private const val MAX_CANDIDATES = 1500
+        private const val MAX_CANDIDATES = 5000
     }
 }
