@@ -23,12 +23,15 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                 ocr TEXT NOT NULL DEFAULT '',
                 user_tags TEXT NOT NULL DEFAULT '',
                 available INTEGER NOT NULL DEFAULT 1,
-                search_text TEXT NOT NULL DEFAULT ''
+                search_text TEXT NOT NULL DEFAULT '',
+                analysis_complete INTEGER NOT NULL DEFAULT 0,
+                analysis_error TEXT NOT NULL DEFAULT ''
             )
             """.trimIndent()
         )
         db.execSQL("CREATE INDEX idx_photos_date ON photos(date_taken DESC)")
         db.execSQL("CREATE INDEX idx_photos_available ON photos(available)")
+        db.execSQL("CREATE INDEX idx_photos_analysis ON photos(analysis_complete)")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -39,12 +42,18 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         if (oldVersion < 3) {
             db.execSQL("ALTER TABLE photos ADD COLUMN search_text TEXT NOT NULL DEFAULT ''")
         }
+        if (oldVersion < 4) {
+            // Existing indexed rows came from the old all-or-nothing analyzer, so they were fully analyzed.
+            db.execSQL("ALTER TABLE photos ADD COLUMN analysis_complete INTEGER NOT NULL DEFAULT 1")
+            db.execSQL("ALTER TABLE photos ADD COLUMN analysis_error TEXT NOT NULL DEFAULT ''")
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_photos_analysis ON photos(analysis_complete)")
+        }
     }
 
     fun isUpToDate(mediaId: Long, dateModified: Long): Boolean {
         readableDatabase.query(
             "photos",
-            arrayOf("date_modified"),
+            arrayOf("date_modified", "analysis_complete"),
             "media_id = ?",
             arrayOf(mediaId.toString()),
             null,
@@ -52,7 +61,9 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             null,
             "1"
         ).use { cursor ->
-            return cursor.moveToFirst() && cursor.getLong(0) == dateModified
+            return cursor.moveToFirst() &&
+                cursor.getLong(0) == dateModified &&
+                cursor.getInt(1) == 1
         }
     }
 
@@ -75,7 +86,11 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         backfillNormalizedSearchText()
     }
 
-    fun upsert(photo: PhotoItem) {
+    fun upsert(
+        photo: PhotoItem,
+        analysisComplete: Boolean,
+        analysisError: String? = null
+    ) {
         val existingTags = getUserTags(photo.mediaId)
         val finalTags = existingTags.ifBlank { photo.userTags }
         val values = ContentValues().apply {
@@ -90,6 +105,8 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             put("user_tags", finalTags)
             put("available", 1)
             put("search_text", buildSearchText(photo, finalTags))
+            put("analysis_complete", if (analysisComplete) 1 else 0)
+            put("analysis_error", analysisError.orEmpty().take(500))
         }
         writableDatabase.insertWithOnConflict("photos", null, values, SQLiteDatabase.CONFLICT_REPLACE)
     }
@@ -232,7 +249,7 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
 
     companion object {
         private const val DB_NAME = "photomind.db"
-        private const val DB_VERSION = 3
+        private const val DB_VERSION = 4
         private const val MAX_CANDIDATES = 5000
         private const val BACKFILL_BATCH = 250
     }
