@@ -15,6 +15,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.recyclerview.widget.GridLayoutManager
 import com.photomind.app.databinding.ActivityMainBinding
 
@@ -56,6 +58,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        applySystemBarInsets()
 
         repository = PhotoRepository(this)
         translator = QueryTranslator()
@@ -68,7 +71,7 @@ class MainActivity : AppCompatActivity() {
         binding.statusText.text = if (existing > 0) {
             "W indeksie: $existing zdjęć. Wpisz czego szukasz."
         } else {
-            "Uruchom indeksowanie, aby PhotoMind nauczył się Twojej galerii."
+            "Indeks jest pusty — kliknij „Indeksuj zdjęcia”."
         }
         updateAccessUi()
 
@@ -92,9 +95,29 @@ class MainActivity : AppCompatActivity() {
         if (existing > 0 && galleryAccess() != GalleryAccess.NONE) performSearch()
     }
 
+    private fun applySystemBarInsets() {
+        val root = binding.root
+        val baseLeft = root.paddingLeft
+        val baseTop = root.paddingTop
+        val baseRight = root.paddingRight
+        val baseBottom = root.paddingBottom
+
+        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            view.setPadding(
+                baseLeft + bars.left,
+                baseTop + bars.top,
+                baseRight + bars.right,
+                baseBottom + bars.bottom
+            )
+            insets
+        }
+        ViewCompat.requestApplyInsets(root)
+    }
+
     override fun onResume() {
         super.onResume()
-        if (::binding.isInitialized) updateAccessUi()
+        if (::binding.isInitialized && ::repository.isInitialized) updateAccessUi()
     }
 
     private fun ensurePermissionAndIndex() {
@@ -110,7 +133,7 @@ class MainActivity : AppCompatActivity() {
             .setTitle("Masz ograniczony dostęp")
             .setMessage(
                 "PhotoMind widzi tylko zdjęcia wybrane w systemowym oknie Androida. " +
-                    "Możesz dodać kolejne zdjęcia, zmienić wybór albo ponownie zaindeksować tylko obecnie udostępnione."
+                    "Możesz dodać kolejne zdjęcia, zmienić wybór albo zaindeksować tylko obecnie udostępnione."
             )
             .setPositiveButton("Dodaj / zmień zdjęcia") { _, _ ->
                 requestGalleryAccessAndIndex()
@@ -148,10 +171,11 @@ class MainActivity : AppCompatActivity() {
     private fun updateAccessUi() {
         if (isIndexing || destroyed) return
 
+        val count = repository.indexedCount()
         when (galleryAccess()) {
             GalleryAccess.FULL -> {
                 binding.accessText.text = "Dostęp do galerii: pełny"
-                binding.indexButton.text = "Odśwież indeks"
+                binding.indexButton.text = if (count == 0) "Indeksuj zdjęcia" else "Odśwież indeks"
             }
             GalleryAccess.PARTIAL -> {
                 binding.accessText.text = "Dostęp do galerii: ograniczony — tylko wybrane zdjęcia"
@@ -179,17 +203,28 @@ class MainActivity : AppCompatActivity() {
                 binding.progress.max = total.coerceAtLeast(1)
                 binding.progress.progress = 0
                 binding.statusText.text = if (total == 0) {
-                    "Android nie udostępnia obecnie żadnych zdjęć. Dodaj zdjęcia do dostępu."
+                    "Android nie udostępnia obecnie żadnych zdjęć."
                 } else {
-                    "Indeksuję $total zdjęć lokalnie… Możesz w tym czasie wyszukiwać już zapisane zdjęcia."
+                    "Indeksuję $total zdjęć lokalnie…"
                 }
             }
 
-            override fun onProgress(done: Int, total: Int, indexed: Int, skipped: Int, failed: Int) = runOnUiThread {
+            override fun onProgress(
+                done: Int,
+                total: Int,
+                indexed: Int,
+                skipped: Int,
+                aiProblems: Int,
+                saveFailed: Int
+            ) = runOnUiThread {
                 if (destroyed) return@runOnUiThread
                 binding.progress.max = total.coerceAtLeast(1)
                 binding.progress.progress = done
-                binding.statusText.text = "$done / $total • nowe: $indexed • bez zmian: $skipped • pominięte: $failed"
+                binding.statusText.text = buildString {
+                    append("$done / $total • zapisane: $indexed • bez zmian: $skipped")
+                    if (aiProblems > 0) append(" • AI problemy: $aiProblems")
+                    if (saveFailed > 0) append(" • błędy zapisu: $saveFailed")
+                }
             }
 
             override fun onFinished(summary: PhotoRepository.IndexSummary) = runOnUiThread {
@@ -201,15 +236,33 @@ class MainActivity : AppCompatActivity() {
 
                 binding.statusText.text = when {
                     summary.errorMessage != null -> "Błąd indeksowania: ${summary.errorMessage}"
-                    summary.cancelled -> "Indeksowanie zatrzymane. Dostępnych w indeksie: $count zdjęć."
+                    summary.cancelled ->
+                        "Indeksowanie zatrzymane. W indeksie: $count zdjęć."
+                    summary.saveFailed > 0 ->
+                        "W indeksie: $count zdjęć. Nie udało się zapisać ${summary.saveFailed} pozycji."
+                    summary.aiProblems > 0 -> {
+                        val reason = summary.firstAiError?.let { " Pierwszy błąd: $it" }.orEmpty()
+                        "W indeksie: $count zdjęć. AI wymaga ponowienia dla ${summary.aiProblems} zdjęć.$reason"
+                    }
                     galleryAccess() == GalleryAccess.PARTIAL ->
-                        "Gotowe. Dostępnych w indeksie: $count zdjęć. Masz ograniczony dostęp — użyj „Dodaj / zmień zdjęcia”, aby rozszerzyć wybór."
+                        "Gotowe. W indeksie: $count zdjęć. Dostęp jest ograniczony do wybranych zdjęć."
                     else ->
-                        "Gotowe. W indeksie: $count zdjęć. Nowe: ${summary.indexed}, pominięte: ${summary.failed}."
+                        "Gotowe. W indeksie: $count zdjęć."
                 }
-                performSearch()
+                refreshRecentGridPreservingStatus()
             }
         })
+    }
+
+    private fun refreshRecentGridPreservingStatus() {
+        if (destroyed || repository.indexedCount() == 0) return
+        repository.search("", null) { results ->
+            if (!destroyed) {
+                runOnUiThread {
+                    if (!destroyed) adapter.submit(results)
+                }
+            }
+        }
     }
 
     private fun performSearch() {
@@ -225,7 +278,7 @@ class MainActivity : AppCompatActivity() {
         val query = binding.searchInput.text?.toString()?.trim().orEmpty()
         if (repository.indexedCount() == 0) {
             adapter.submit(emptyList())
-            binding.statusText.text = "Indeks jest pusty — najpierw uruchom indeksowanie."
+            binding.statusText.text = "Indeks jest pusty — kliknij „Indeksuj zdjęcia”."
             return
         }
 
