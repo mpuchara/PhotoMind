@@ -57,7 +57,11 @@ class SceneDescriber(private val context: Context) {
                 topK = 8
                 candidateCount = 1
             }
-            val response = runBlocking { model.generateContent(request) }.text.orEmpty()
+            val response = runBlocking { model.generateContent(request) }
+                .candidates
+                .firstOrNull()
+                ?.text
+                .orEmpty()
             val tags = SceneTagCatalog.sanitizeModelOutput(response)
             return Result(description = tags.joinToString(", "))
         } catch (error: Exception) {
