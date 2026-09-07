@@ -22,7 +22,8 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                 labels TEXT NOT NULL DEFAULT '',
                 ocr TEXT NOT NULL DEFAULT '',
                 user_tags TEXT NOT NULL DEFAULT '',
-                available INTEGER NOT NULL DEFAULT 1
+                available INTEGER NOT NULL DEFAULT 1,
+                search_text TEXT NOT NULL DEFAULT ''
             )
             """.trimIndent()
         )
@@ -34,6 +35,9 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         if (oldVersion < 2) {
             db.execSQL("ALTER TABLE photos ADD COLUMN available INTEGER NOT NULL DEFAULT 1")
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_photos_available ON photos(available)")
+        }
+        if (oldVersion < 3) {
+            db.execSQL("ALTER TABLE photos ADD COLUMN search_text TEXT NOT NULL DEFAULT ''")
         }
     }
 
@@ -68,10 +72,12 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         } finally {
             db.endTransaction()
         }
+        backfillNormalizedSearchText()
     }
 
     fun upsert(photo: PhotoItem) {
         val existingTags = getUserTags(photo.mediaId)
+        val finalTags = existingTags.ifBlank { photo.userTags }
         val values = ContentValues().apply {
             put("media_id", photo.mediaId)
             put("uri", photo.uri)
@@ -81,14 +87,20 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             put("date_modified", photo.dateModified)
             put("labels", photo.labels)
             put("ocr", photo.ocr)
-            put("user_tags", existingTags.ifBlank { photo.userTags })
+            put("user_tags", finalTags)
             put("available", 1)
+            put("search_text", buildSearchText(photo, finalTags))
         }
         writableDatabase.insertWithOnConflict("photos", null, values, SQLiteDatabase.CONFLICT_REPLACE)
     }
 
     fun updateUserTags(mediaId: Long, tags: String) {
-        val values = ContentValues().apply { put("user_tags", tags.trim()) }
+        val normalizedTags = tags.trim()
+        val photo = findById(mediaId)
+        val values = ContentValues().apply {
+            put("user_tags", normalizedTags)
+            if (photo != null) put("search_text", buildSearchText(photo, normalizedTags))
+        }
         writableDatabase.update("photos", values, "media_id = ?", arrayOf(mediaId.toString()))
     }
 
@@ -119,16 +131,17 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
     )
 
     fun searchScored(query: String, limit: Int = 300): List<ScoredPhoto> {
+        backfillNormalizedSearchText()
         val scoreTokens = SearchText.tokens(query)
         if (scoreTokens.isEmpty()) return recent(limit).map { ScoredPhoto(it, 0) }
 
         val candidateTokens = (SearchText.rawTokens(query) + scoreTokens).distinct()
         val where = candidateTokens.joinToString(" OR ") {
-            "(LOWER(labels) LIKE ? OR LOWER(ocr) LIKE ? OR LOWER(display_name) LIKE ? OR LOWER(bucket) LIKE ? OR LOWER(user_tags) LIKE ?)"
+            "(search_text LIKE ? OR LOWER(labels) LIKE ? OR LOWER(ocr) LIKE ? OR LOWER(display_name) LIKE ? OR LOWER(bucket) LIKE ? OR LOWER(user_tags) LIKE ?)"
         }
         val args = mutableListOf<String>()
         candidateTokens.forEach { token ->
-            repeat(5) { args += "%$token%" }
+            repeat(6) { args += "%$token%" }
         }
         args += MAX_CANDIDATES.toString()
 
@@ -145,6 +158,47 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                     .thenByDescending { it.photo.dateTaken }
             )
             .take(limit)
+    }
+
+    private fun findById(mediaId: Long): PhotoItem? {
+        return queryItems(
+            "SELECT * FROM photos WHERE media_id = ? LIMIT 1",
+            arrayOf(mediaId.toString())
+        ).firstOrNull()
+    }
+
+    private fun buildSearchText(photo: PhotoItem, tags: String = photo.userTags): String {
+        return SearchText.fold(
+            listOf(photo.labels, photo.ocr, photo.displayName, photo.bucket, tags)
+                .joinToString(" ")
+        ).ifBlank { " " }
+    }
+
+    @Synchronized
+    private fun backfillNormalizedSearchText() {
+        while (true) {
+            val batch = queryItems(
+                "SELECT * FROM photos WHERE search_text = '' LIMIT ?",
+                arrayOf(BACKFILL_BATCH.toString())
+            )
+            if (batch.isEmpty()) return
+
+            val db = writableDatabase
+            db.beginTransaction()
+            try {
+                val statement = db.compileStatement("UPDATE photos SET search_text = ? WHERE media_id = ?")
+                batch.forEach { photo ->
+                    statement.clearBindings()
+                    statement.bindString(1, buildSearchText(photo))
+                    statement.bindLong(2, photo.mediaId)
+                    statement.executeUpdateDelete()
+                }
+                statement.close()
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
+            }
+        }
     }
 
     private fun queryItems(sql: String, args: Array<String>): List<PhotoItem> {
@@ -178,7 +232,8 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
 
     companion object {
         private const val DB_NAME = "photomind.db"
-        private const val DB_VERSION = 2
+        private const val DB_VERSION = 3
         private const val MAX_CANDIDATES = 5000
+        private const val BACKFILL_BATCH = 250
     }
 }
