@@ -7,6 +7,8 @@ import android.os.Build
 import androidx.core.content.ContextCompat
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.Worker
@@ -47,7 +49,8 @@ class AutoIndexWorker(
     }
 
     companion object {
-        private const val UNIQUE_WORK = "photomind-auto-index"
+        private const val UNIQUE_PERIODIC_WORK = "photomind-auto-index"
+        private const val UNIQUE_IMMEDIATE_WORK = "photomind-retag-reindex"
 
         fun schedule(context: Context) {
             val constraints = Constraints.Builder()
@@ -58,8 +61,18 @@ class AutoIndexWorker(
                 .setConstraints(constraints)
                 .build()
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
-                UNIQUE_WORK,
+                UNIQUE_PERIODIC_WORK,
                 ExistingPeriodicWorkPolicy.UPDATE,
+                request
+            )
+        }
+
+        /** Called after any manual tag/person-name change. Incremental DB flags make unchanged photos skip. */
+        fun runNow(context: Context) {
+            val request = OneTimeWorkRequestBuilder<AutoIndexWorker>().build()
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                UNIQUE_IMMEDIATE_WORK,
+                ExistingWorkPolicy.REPLACE,
                 request
             )
         }

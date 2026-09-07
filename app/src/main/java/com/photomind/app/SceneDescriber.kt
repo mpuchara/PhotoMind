@@ -6,15 +6,18 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.util.Size
-import com.google.mlkit.genai.common.DownloadCallback
 import com.google.mlkit.genai.common.FeatureStatus
-import com.google.mlkit.genai.common.GenAiException
-import com.google.mlkit.genai.imagedescription.ImageDescription
-import com.google.mlkit.genai.imagedescription.ImageDescriptionRequest
-import com.google.mlkit.genai.imagedescription.ImageDescriber
-import com.google.mlkit.genai.imagedescription.ImageDescriberOptions
+import com.google.mlkit.genai.prompt.Generation
+import com.google.mlkit.genai.prompt.ImagePart
+import com.google.mlkit.genai.prompt.TextPart
+import com.google.mlkit.genai.prompt.generateContentRequest
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.runBlocking
 
-/** Foreground-only Gemini Nano enrichment for rich scene descriptions. */
+/**
+ * Foreground-only Gemini Nano scene tagger.
+ * It is intentionally prohibited from returning people, locations or dates.
+ */
 class SceneDescriber(private val context: Context) {
     data class Result(
         val description: String = "",
@@ -23,44 +26,12 @@ class SceneDescriber(private val context: Context) {
         val error: String? = null
     )
 
-    private val describer: ImageDescriber = ImageDescription.getClient(
-        ImageDescriberOptions.builder(context).build()
-    )
+    private val model = Generation.getClient()
 
     fun describe(uri: Uri): Result {
-        val status = try {
-            describer.checkFeatureStatus().get()
-        } catch (error: Exception) {
-            return Result(supported = false, error = compactError(unwrap(error)))
+        if (!ensureReady()) {
+            return Result(supported = false, error = "Gemini Nano Prompt API nie jest dostępny na tym urządzeniu")
         }
-
-        if (status == FeatureStatus.UNAVAILABLE) {
-            return Result(supported = false, error = "Gemini Nano Image Description nie jest dostępny na tym urządzeniu")
-        }
-
-        // Google exposes a downloadable state in addition to AVAILABLE/UNAVAILABLE.
-        // Fetch the on-device feature automatically; this is model download only, not photo upload.
-        if (status != FeatureStatus.AVAILABLE) {
-            val downloadError = arrayOfNulls<GenAiException>(1)
-            try {
-                describer.downloadFeature(
-                    object : DownloadCallback {
-                        override fun onDownloadStarted(bytesToDownload: Long) = Unit
-                        override fun onDownloadProgress(totalBytesDownloaded: Long) = Unit
-                        override fun onDownloadCompleted() = Unit
-                        override fun onDownloadFailed(e: GenAiException) {
-                            downloadError[0] = e
-                        }
-                    }
-                ).get()
-            } catch (error: Exception) {
-                return Result(retryLater = true, error = compactError(unwrap(error)))
-            }
-            downloadError[0]?.let {
-                return Result(retryLater = true, error = compactError(it))
-            }
-        }
-
         val bitmap = try {
             loadBitmap(uri)
         } catch (error: Exception) {
@@ -68,20 +39,47 @@ class SceneDescriber(private val context: Context) {
         }
 
         try {
-            val request = ImageDescriptionRequest.builder(bitmap).build()
-            val result = describer.runInference(request).get()
-            return Result(description = result.description.trim())
-        } catch (error: Exception) {
-            val cause = unwrap(error)
-            // AICore errors such as busy/quota/background restrictions are transient in
-            // practice. The beta API's exact enum set changes between releases, so retry
-            // GenAI failures in a later foreground session instead of binding to enum names.
-            if (cause is GenAiException) {
-                return Result(retryLater = true, error = compactError(cause))
+            val prompt = """
+                Classify ONLY the visible scene, environment, objects and activities in this photo.
+                Return ONLY comma-separated tags from this exact list:
+                ${SceneTagCatalog.promptList()}
+
+                Important:
+                - Never return people, person, man, woman, child, boy, girl, family, face or names.
+                - Never infer or return a geographic place name.
+                - Never infer or return a date, year or time from context.
+                - Do not output OCR text.
+                - Pick only tags clearly supported by the pixels. Maximum 12 tags.
+                - No explanation, no sentences.
+            """.trimIndent()
+            val request = generateContentRequest(ImagePart(bitmap), TextPart(prompt)) {
+                temperature = 0.1f
+                topK = 8
+                candidateCount = 1
             }
-            return Result(error = compactError(cause))
+            val response = runBlocking { model.generateContent(request) }.text.orEmpty()
+            val tags = SceneTagCatalog.sanitizeModelOutput(response)
+            return Result(description = tags.joinToString(", "))
+        } catch (error: Exception) {
+            val text = compactError(error)
+            val retry = text.contains("BUSY", true) ||
+                text.contains("BATTERY", true) ||
+                text.contains("BACKGROUND", true) ||
+                text.contains("QUOTA", true)
+            return Result(retryLater = retry, error = text)
         } finally {
             if (!bitmap.isRecycled) bitmap.recycle()
+        }
+    }
+
+    private fun ensureReady(): Boolean = runBlocking {
+        when (model.checkStatus()) {
+            FeatureStatus.AVAILABLE -> true
+            FeatureStatus.DOWNLOADABLE -> {
+                model.download().collect { }
+                model.checkStatus() == FeatureStatus.AVAILABLE
+            }
+            else -> false
         }
     }
 
@@ -91,19 +89,15 @@ class SceneDescriber(private val context: Context) {
         }
         return context.contentResolver.openInputStream(uri)?.use { stream ->
             BitmapFactory.decodeStream(stream)
-        } ?: throw IllegalStateException("Nie udało się wczytać zdjęcia do opisu sceny")
-    }
-
-    private fun unwrap(error: Throwable): Throwable {
-        var current = error
-        while (current.cause != null && current.cause !== current) current = current.cause!!
-        return current
+        } ?: throw IllegalStateException("Nie udało się wczytać zdjęcia do tagowania scenerii")
     }
 
     private fun compactError(error: Throwable): String {
-        val message = error.message?.replace(Regex("\\s+"), " ")?.take(180).orEmpty()
-        return if (message.isBlank()) error.javaClass.simpleName else "${error.javaClass.simpleName}: $message"
+        var current = error
+        while (current.cause != null && current.cause !== current) current = current.cause!!
+        val message = current.message?.replace(Regex("\\s+"), " ")?.take(180).orEmpty()
+        return if (message.isBlank()) current.javaClass.simpleName else "${current.javaClass.simpleName}: $message"
     }
 
-    fun close() = describer.close()
+    fun close() = model.close()
 }

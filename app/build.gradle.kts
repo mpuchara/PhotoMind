@@ -11,8 +11,8 @@ android {
         applicationId = "com.photomind.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.2.0"
+        versionCode = 5
+        versionName = "0.3.0"
     }
 
     buildFeatures {
@@ -39,11 +39,11 @@ dependencies {
 
     implementation("com.google.mlkit:image-labeling:17.0.9")
     implementation("com.google.mlkit:text-recognition:16.0.1")
-    implementation("com.google.mlkit:translate:17.0.3")
     implementation("com.google.mlkit:face-detection:16.1.7")
-    implementation("com.google.mlkit:genai-image-description:1.0.0-beta1")
+    implementation("com.google.mlkit:genai-prompt:1.0.0-beta4")
 
     implementation("org.tensorflow:tensorflow-lite:2.14.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
 
     testImplementation("junit:junit:4.13.2")
 }

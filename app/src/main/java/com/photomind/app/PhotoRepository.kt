@@ -10,11 +10,16 @@ import java.util.concurrent.atomic.AtomicBoolean
 class PhotoRepository(context: Context) {
     private val appContext = context.applicationContext
     private val database = PhotoDatabase(appContext)
+    private val metadataIndex = MetadataIndex(appContext)
     private val analyzer = PhotoAnalyzer(appContext)
     private val indexExecutor = Executors.newSingleThreadExecutor()
     private val sceneExecutor = Executors.newSingleThreadExecutor()
     private val queryExecutor = Executors.newFixedThreadPool(2)
     private val cancelled = AtomicBoolean(false)
+
+    init {
+        database.prepareStructuredSceneMigration(appContext)
+    }
 
     data class IndexSummary(
         val indexed: Int,
@@ -75,6 +80,11 @@ class PhotoRepository(context: Context) {
                     if (cancelled.get()) break
                     val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, entry.id)
 
+                    // Time and GPS are read from file/media metadata independently from visual AI.
+                    runCatching {
+                        metadataIndex.ensure(entry.id, uri, entry.dateTaken, entry.dateModified)
+                    }
+
                     if (database.isUpToDate(entry.id, entry.dateModified)) {
                         skipped++
                     } else {
@@ -116,7 +126,8 @@ class PhotoRepository(context: Context) {
                                     faceCount = analysis.faceCount
                                 ),
                                 analysisComplete = analysis.complete,
-                                analysisError = listOfNotNull(analysis.error, analysis.faceError).joinToString("; ").ifBlank { null },
+                                analysisError = listOfNotNull(analysis.error, analysis.faceError)
+                                    .joinToString("; ").ifBlank { null },
                                 facesComplete = analysis.facesComplete
                             )
                             clusterer.assignPhoto(
@@ -160,10 +171,7 @@ class PhotoRepository(context: Context) {
         }
     }
 
-    /**
-     * Progressive foreground enrichment with Gemini Nano. We intentionally stop at a bounded batch:
-     * AICore has per-app battery/usage quotas and blocks background GenAI inference.
-     */
+    /** Progressive foreground Gemini Nano tagging using the same canonical scene vocabulary as search. */
     fun enrichScenes(maxPerSession: Int = 60, callback: SceneCallback) {
         sceneExecutor.execute {
             val candidates = database.photosNeedingScene(maxPerSession)
@@ -200,7 +208,6 @@ class PhotoRepository(context: Context) {
                             break
                         }
                         else -> {
-                            // Permanent problem for this image: don't let it block the queue forever.
                             database.updateScene(photo.mediaId, "", complete = true)
                             message = result.error ?: message
                         }
@@ -224,7 +231,10 @@ class PhotoRepository(context: Context) {
 
     fun namePersonCluster(clusterId: Long, name: String, callback: () -> Unit) {
         queryExecutor.execute {
-            database.nameCluster(clusterId, name)
+            database.nameCluster(clusterId, name.trim())
+            // A changed identity label triggers an incremental re-pass so local face patterns are checked again.
+            database.invalidateClusterForRename(clusterId)
+            AutoIndexWorker.runNow(appContext)
             callback()
         }
     }
@@ -279,6 +289,14 @@ class PhotoRepository(context: Context) {
                 callback(database.recent())
                 return@execute
             }
+
+            val intent = translated?.let(SearchIntent::decode)
+            if (intent != null) {
+                callback(searchStructured(original, intent))
+                return@execute
+            }
+
+            // Compatibility fallback for old/non-structured callers.
             val merged = LinkedHashMap<Long, PhotoDatabase.ScoredPhoto>()
             fun merge(hit: PhotoDatabase.ScoredPhoto) {
                 val current = merged[hit.photo.mediaId]
@@ -297,10 +315,80 @@ class PhotoRepository(context: Context) {
         }
     }
 
+    private fun searchStructured(original: String, rawIntent: SearchIntent): List<PhotoItem> {
+        val knownNames = database.knownPersonNames()
+        val people = rawIntent.people.mapNotNull { requested ->
+            knownNames.firstOrNull { SearchText.fold(it) == SearchText.fold(requested) }
+        }.distinctBy { SearchText.fold(it) }
+        val sceneTags = rawIntent.sceneTags.filter { it in SceneTagCatalog.allowed }.distinct()
+        val intent = rawIntent.copy(people = people, sceneTags = sceneTags)
+
+        val metadataIds = metadataIndex.matchingIds(intent.year, intent.place)
+        val textParts = intent.people + intent.sceneTags
+
+        var candidates: List<PhotoItem> = when {
+            textParts.isNotEmpty() -> database.searchScored(textParts.joinToString(" "), 1500).map { it.photo }
+            metadataIds != null -> database.photosByIds(metadataIds, 5000)
+            else -> database.searchScored(original, 1500).map { it.photo }
+        }
+
+        if (metadataIds != null) {
+            candidates = candidates.filter { it.mediaId in metadataIds }
+        }
+
+        if (intent.people.isNotEmpty()) {
+            candidates = candidates.filter { photo ->
+                val haystack = SearchText.fold(photo.people)
+                intent.people.all { name -> haystack.contains(SearchText.fold(name)) }
+            }
+        }
+
+        if (intent.sceneTags.isNotEmpty()) {
+            candidates = candidates.filter { photo ->
+                val indexedScenes = SceneTagCatalog.sanitizeModelOutput(
+                    listOf(photo.labels, photo.sceneDescription, photo.userTags).joinToString(" ")
+                ).toSet()
+                intent.sceneTags.all { it in indexedScenes }
+            }
+        }
+
+        // If a place was requested but the file has no GPS, allow a narrow metadata-text fallback
+        // (e.g. album/folder named "Rożnów") rather than inventing a visual location.
+        if (candidates.isEmpty() && !intent.place.isNullOrBlank()) {
+            val placeHits = database.searchScored(intent.place, 1000).map { it.photo }
+            candidates = placeHits.filter { photo ->
+                val yearOk = intent.year == null || yearFromMediaTimestamp(photo.dateTaken) == intent.year
+                val peopleOk = intent.people.all { SearchText.fold(photo.people).contains(SearchText.fold(it)) }
+                val scenes = SceneTagCatalog.sanitizeModelOutput(
+                    listOf(photo.labels, photo.sceneDescription, photo.userTags).joinToString(" ")
+                ).toSet()
+                val sceneOk = intent.sceneTags.all { it in scenes }
+                yearOk && peopleOk && sceneOk
+            }
+        }
+
+        // When the model found no structured dimension, preserve OCR/custom-tag search behavior.
+        if (intent.people.isEmpty() && intent.sceneTags.isEmpty() && intent.place == null && intent.year == null) {
+            return database.searchScored(original).map { it.photo }.take(300)
+        }
+
+        return candidates.distinctBy { it.mediaId }.sortedByDescending { it.dateTaken }.take(300)
+    }
+
+    private fun yearFromMediaTimestamp(timestamp: Long): Int? {
+        if (timestamp <= 0L) return null
+        return java.text.SimpleDateFormat("yyyy", java.util.Locale.US)
+            .format(java.util.Date(timestamp)).toIntOrNull()
+    }
+
     fun updateTags(photo: PhotoItem, tags: String, callback: () -> Unit) {
         queryExecutor.execute {
-            database.updateUserTags(photo.mediaId, tags)
-            photo.userTags = tags.trim()
+            val normalized = SceneTagCatalog.normalizeUserTags(tags)
+            database.updateUserTags(photo.mediaId, normalized)
+            photo.userTags = normalized
+            // Any manual correction invalidates this photo and starts a fresh incremental pattern pass.
+            database.invalidatePhotoForRetag(photo.mediaId)
+            AutoIndexWorker.runNow(appContext)
             callback()
         }
     }
@@ -313,6 +401,7 @@ class PhotoRepository(context: Context) {
         sceneExecutor.shutdownNow()
         queryExecutor.shutdownNow()
         analyzer.close()
+        metadataIndex.close()
         database.close()
     }
 }
