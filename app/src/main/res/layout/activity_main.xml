@@ -7,6 +7,7 @@
     android:paddingStart="16dp"
     android:paddingEnd="16dp"
     android:paddingTop="14dp"
+    android:paddingBottom="8dp"
     android:background="?attr/colorSurface">
 
     <TextView
@@ -37,7 +38,8 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="14dp"
-        android:hint="Czego szukasz?">
+        android:hint="Czego szukasz?"
+        app:placeholderText="@string/search_hint">
 
         <com.google.android.material.textfield.TextInputEditText
             android:id="@+id/searchInput"
@@ -45,8 +47,7 @@
             android:layout_height="wrap_content"
             android:imeOptions="actionSearch"
             android:inputType="text"
-            android:maxLines="1"
-            android:hint="@string/search_hint" />
+            android:maxLines="1" />
     </com.google.android.material.textfield.TextInputLayout>
 
     <LinearLayout
