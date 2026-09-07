@@ -25,12 +25,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var adapter: PhotoAdapter
     private var isIndexing = false
     private var startIndexAfterPermission = false
+    private var destroyed = false
+    private var searchGeneration = 0
 
     private enum class GalleryAccess { FULL, PARTIAL, NONE }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
+        if (destroyed) return@registerForActivityResult
+
         val access = galleryAccess()
         updateAccessUi()
 
@@ -142,7 +146,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateAccessUi() {
-        if (isIndexing) return
+        if (isIndexing || destroyed) return
 
         when (galleryAccess()) {
             GalleryAccess.FULL -> {
@@ -162,7 +166,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startIndexing() {
-        if (isIndexing || galleryAccess() == GalleryAccess.NONE) return
+        if (isIndexing || destroyed || galleryAccess() == GalleryAccess.NONE) return
         isIndexing = true
         binding.indexButton.text = "Zatrzymaj"
         binding.progress.visibility = View.VISIBLE
@@ -170,6 +174,7 @@ class MainActivity : AppCompatActivity() {
 
         repository.indexAll(object : PhotoRepository.IndexCallback {
             override fun onStarted(total: Int) = runOnUiThread {
+                if (destroyed) return@runOnUiThread
                 binding.progress.isIndeterminate = false
                 binding.progress.max = total.coerceAtLeast(1)
                 binding.progress.progress = 0
@@ -181,12 +186,14 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onProgress(done: Int, total: Int, indexed: Int, skipped: Int, failed: Int) = runOnUiThread {
+                if (destroyed) return@runOnUiThread
                 binding.progress.max = total.coerceAtLeast(1)
                 binding.progress.progress = done
                 binding.statusText.text = "$done / $total • nowe: $indexed • bez zmian: $skipped • pominięte: $failed"
             }
 
             override fun onFinished(summary: PhotoRepository.IndexSummary) = runOnUiThread {
+                if (destroyed) return@runOnUiThread
                 isIndexing = false
                 binding.progress.visibility = View.GONE
                 updateAccessUi()
@@ -206,6 +213,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun performSearch() {
+        if (destroyed) return
+        val generation = ++searchGeneration
+
         if (galleryAccess() == GalleryAccess.NONE) {
             adapter.submit(emptyList())
             binding.statusText.text = "Najpierw nadaj PhotoMind dostęp do zdjęć."
@@ -221,9 +231,13 @@ class MainActivity : AppCompatActivity() {
 
         if (query.isBlank()) {
             repository.search("", null) { results ->
-                runOnUiThread {
-                    adapter.submit(results)
-                    binding.statusText.text = "Ostatnio dostępne: ${results.size} zdjęć."
+                if (!destroyed) {
+                    runOnUiThread {
+                        if (!destroyed && generation == searchGeneration) {
+                            adapter.submit(results)
+                            binding.statusText.text = "Ostatnio dostępne: ${results.size} zdjęć."
+                        }
+                    }
                 }
             }
             return
@@ -232,18 +246,28 @@ class MainActivity : AppCompatActivity() {
         translator.translatePolishToEnglish(
             query = query,
             onPreparing = {
-                runOnUiThread {
-                    binding.statusText.text = "Szukam lokalnie… Przy pierwszym użyciu może zostać pobrany model PL→EN."
+                if (!destroyed) {
+                    runOnUiThread {
+                        if (!destroyed && generation == searchGeneration) {
+                            binding.statusText.text = "Szukam lokalnie… Przy pierwszym użyciu może zostać pobrany model PL→EN."
+                        }
+                    }
                 }
             },
             onResult = { translated ->
-                repository.search(query, translated) { results ->
-                    runOnUiThread {
-                        adapter.submit(results)
-                        binding.statusText.text = if (results.isEmpty()) {
-                            "Brak wyników dla „$query”. Spróbuj prostszych słów albo dodaj własny tag."
-                        } else {
-                            "Znaleziono ${results.size} zdjęć dla „$query”. Najtrafniejsze są na początku."
+                if (!destroyed && generation == searchGeneration) {
+                    repository.search(query, translated) { results ->
+                        if (!destroyed) {
+                            runOnUiThread {
+                                if (!destroyed && generation == searchGeneration) {
+                                    adapter.submit(results)
+                                    binding.statusText.text = if (results.isEmpty()) {
+                                        "Brak wyników dla „$query”. Spróbuj prostszych słów albo dodaj własny tag."
+                                    } else {
+                                        "Znaleziono ${results.size} zdjęć dla „$query”. Najtrafniejsze są na początku."
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -264,9 +288,13 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("Anuluj", null)
             .setPositiveButton("Zapisz") { _, _ ->
                 repository.updateTags(photo, input.text.toString()) {
-                    runOnUiThread {
-                        adapter.itemChanged(photo)
-                        Toast.makeText(this, "Tag zapisany lokalnie", Toast.LENGTH_SHORT).show()
+                    if (!destroyed) {
+                        runOnUiThread {
+                            if (!destroyed) {
+                                adapter.itemChanged(photo)
+                                Toast.makeText(this, "Tag zapisany lokalnie", Toast.LENGTH_SHORT).show()
+                            }
+                        }
                     }
                 }
             }
@@ -332,6 +360,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        destroyed = true
+        searchGeneration++
         translator.close()
         repository.close()
         super.onDestroy()
