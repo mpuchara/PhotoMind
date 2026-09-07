@@ -10,10 +10,25 @@ class PhotoRepository(context: Context) {
     private val appContext = context.applicationContext
     private val database = PhotoDatabase(appContext)
     private val analyzer = PhotoAnalyzer(appContext)
-    private val executor = Executors.newSingleThreadExecutor()
+    private val indexExecutor = Executors.newSingleThreadExecutor()
+    private val queryExecutor = Executors.newFixedThreadPool(2)
     private val cancelled = AtomicBoolean(false)
 
-    data class IndexSummary(val indexed: Int, val skipped: Int, val failed: Int, val cancelled: Boolean)
+    data class IndexSummary(
+        val indexed: Int,
+        val skipped: Int,
+        val failed: Int,
+        val cancelled: Boolean,
+        val errorMessage: String? = null
+    )
+
+    private data class MediaEntry(
+        val id: Long,
+        val displayName: String,
+        val bucket: String,
+        val dateTaken: Long,
+        val dateModified: Long
+    )
 
     interface IndexCallback {
         fun onStarted(total: Int)
@@ -23,54 +38,34 @@ class PhotoRepository(context: Context) {
 
     fun indexAll(callback: IndexCallback) {
         cancelled.set(false)
-        executor.execute {
+        indexExecutor.execute {
             var indexed = 0
             var skipped = 0
             var failed = 0
             var done = 0
 
-            val projection = arrayOf(
-                MediaStore.Images.Media._ID,
-                MediaStore.Images.Media.DISPLAY_NAME,
-                MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
-                MediaStore.Images.Media.DATE_TAKEN,
-                MediaStore.Images.Media.DATE_MODIFIED
-            )
+            try {
+                val entries = readAccessibleMedia()
+                database.syncAvailability(entries.map { it.id })
+                callback.onStarted(entries.size)
 
-            appContext.contentResolver.query(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                projection,
-                null,
-                null,
-                "${MediaStore.Images.Media.DATE_TAKEN} DESC"
-            )?.use { cursor ->
-                val total = cursor.count
-                callback.onStarted(total)
+                for (entry in entries) {
+                    if (cancelled.get()) break
 
-                val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-                val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
-                val bucketCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
-                val takenCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_TAKEN)
-                val modifiedCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_MODIFIED)
-
-                while (cursor.moveToNext() && !cancelled.get()) {
-                    val id = cursor.getLong(idCol)
-                    val modified = cursor.getLong(modifiedCol)
-                    val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
-
-                    if (database.isUpToDate(id, modified)) {
+                    val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, entry.id)
+                    if (database.isUpToDate(entry.id, entry.dateModified)) {
                         skipped++
                     } else {
                         try {
                             val analysis = analyzer.analyze(uri)
                             database.upsert(
                                 PhotoItem(
-                                    mediaId = id,
+                                    mediaId = entry.id,
                                     uri = uri.toString(),
-                                    displayName = cursor.getString(nameCol).orEmpty(),
-                                    bucket = cursor.getString(bucketCol).orEmpty(),
-                                    dateTaken = cursor.getLong(takenCol),
-                                    dateModified = modified,
+                                    displayName = entry.displayName,
+                                    bucket = entry.bucket,
+                                    dateTaken = entry.dateTaken,
+                                    dateModified = entry.dateModified,
                                     labels = analysis.labels,
                                     ocr = analysis.ocr,
                                     userTags = ""
@@ -83,14 +78,71 @@ class PhotoRepository(context: Context) {
                     }
 
                     done++
-                    if (done == total || done % 5 == 0) {
-                        callback.onProgress(done, total, indexed, skipped, failed)
+                    if (done == entries.size || done % 5 == 0) {
+                        callback.onProgress(done, entries.size, indexed, skipped, failed)
                     }
                 }
 
                 callback.onFinished(IndexSummary(indexed, skipped, failed, cancelled.get()))
-            } ?: callback.onFinished(IndexSummary(0, 0, 1, false))
+            } catch (security: SecurityException) {
+                callback.onFinished(
+                    IndexSummary(
+                        indexed = indexed,
+                        skipped = skipped,
+                        failed = failed,
+                        cancelled = false,
+                        errorMessage = "Android zmienił dostęp do zdjęć. Wybierz zdjęcia ponownie i uruchom indeksowanie."
+                    )
+                )
+            } catch (error: Exception) {
+                callback.onFinished(
+                    IndexSummary(
+                        indexed = indexed,
+                        skipped = skipped,
+                        failed = failed,
+                        cancelled = false,
+                        errorMessage = error.message ?: "Nie udało się odczytać galerii."
+                    )
+                )
+            }
         }
+    }
+
+    private fun readAccessibleMedia(): List<MediaEntry> {
+        val projection = arrayOf(
+            MediaStore.Images.Media._ID,
+            MediaStore.Images.Media.DISPLAY_NAME,
+            MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
+            MediaStore.Images.Media.DATE_TAKEN,
+            MediaStore.Images.Media.DATE_MODIFIED
+        )
+
+        val entries = ArrayList<MediaEntry>()
+        appContext.contentResolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            projection,
+            null,
+            null,
+            "${MediaStore.Images.Media.DATE_TAKEN} DESC"
+        )?.use { cursor ->
+            val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+            val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+            val bucketCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
+            val takenCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_TAKEN)
+            val modifiedCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_MODIFIED)
+
+            while (cursor.moveToNext()) {
+                entries += MediaEntry(
+                    id = cursor.getLong(idCol),
+                    displayName = cursor.getString(nameCol).orEmpty(),
+                    bucket = cursor.getString(bucketCol).orEmpty(),
+                    dateTaken = cursor.getLong(takenCol),
+                    dateModified = cursor.getLong(modifiedCol)
+                )
+            }
+        } ?: throw IllegalStateException("Android nie udostępnił listy zdjęć.")
+
+        return entries
     }
 
     fun cancelIndexing() {
@@ -98,22 +150,39 @@ class PhotoRepository(context: Context) {
     }
 
     fun search(original: String, translated: String?, callback: (List<PhotoItem>) -> Unit) {
-        executor.execute {
+        queryExecutor.execute {
             if (original.isBlank()) {
                 callback(database.recent())
                 return@execute
             }
-            val merged = LinkedHashMap<Long, PhotoItem>()
-            database.search(original).forEach { merged[it.mediaId] = it }
-            if (!translated.isNullOrBlank() && !translated.equals(original, ignoreCase = true)) {
-                database.search(translated).forEach { merged[it.mediaId] = it }
+
+            val merged = LinkedHashMap<Long, PhotoDatabase.ScoredPhoto>()
+            fun merge(hit: PhotoDatabase.ScoredPhoto) {
+                val current = merged[hit.photo.mediaId]
+                if (current == null || hit.score > current.score) {
+                    merged[hit.photo.mediaId] = hit
+                }
             }
-            callback(merged.values.sortedByDescending { it.dateTaken }.take(300))
+
+            database.searchScored(original).forEach(::merge)
+            if (!translated.isNullOrBlank() && !translated.equals(original, ignoreCase = true)) {
+                database.searchScored(translated).forEach(::merge)
+            }
+
+            val ranked = merged.values
+                .sortedWith(
+                    compareByDescending<PhotoDatabase.ScoredPhoto> { it.score }
+                        .thenByDescending { it.photo.dateTaken }
+                )
+                .take(300)
+                .map { it.photo }
+
+            callback(ranked)
         }
     }
 
     fun updateTags(photo: PhotoItem, tags: String, callback: () -> Unit) {
-        executor.execute {
+        queryExecutor.execute {
             database.updateUserTags(photo.mediaId, tags)
             photo.userTags = tags.trim()
             callback()
@@ -124,8 +193,9 @@ class PhotoRepository(context: Context) {
 
     fun close() {
         cancelIndexing()
+        indexExecutor.shutdownNow()
+        queryExecutor.shutdownNow()
         analyzer.close()
         database.close()
-        executor.shutdownNow()
     }
 }
