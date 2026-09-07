@@ -7,9 +7,9 @@
     <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
 
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@drawable/ic_launcher"
-        android:label="PhotoMind"
+        android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.PhotoMind">
         <activity
