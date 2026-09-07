@@ -26,6 +26,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var translator: QueryTranslator
     private lateinit var adapter: PhotoAdapter
     private var isIndexing = false
+    private var sceneEnriching = false
+    private var automaticIndexStarted = false
     private var startIndexAfterPermission = false
     private var destroyed = false
     private var searchGeneration = 0
@@ -36,17 +38,15 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
         if (destroyed) return@registerForActivityResult
-
         val access = galleryAccess()
         updateAccessUi()
-
         if (access != GalleryAccess.NONE) {
             binding.statusText.text = if (access == GalleryAccess.FULL) {
-                "Pełny dostęp przyznany."
+                "Pełny dostęp przyznany. Automatycznie buduję indeks."
             } else {
-                "Dostęp do wybranych zdjęć przyznany. Możesz później dodać kolejne."
+                "Dostęp do wybranych zdjęć przyznany. Automatycznie buduję indeks."
             }
-            if (startIndexAfterPermission) startIndexing()
+            if (startIndexAfterPermission) startIndexing(automatic = true)
         } else {
             binding.statusText.text = "Bez dostępu do zdjęć PhotoMind nie może zbudować indeksu."
             showPermissionHelp()
@@ -63,17 +63,19 @@ class MainActivity : AppCompatActivity() {
         repository = PhotoRepository(this)
         translator = QueryTranslator()
         adapter = PhotoAdapter(::openPhoto, ::showTagDialog)
+        AutoIndexWorker.schedule(this)
 
         binding.photoGrid.layoutManager = GridLayoutManager(this, 3)
         binding.photoGrid.adapter = adapter
 
         val existing = repository.indexedCount()
         binding.statusText.text = if (existing > 0) {
-            "W indeksie: $existing zdjęć. Wpisz czego szukasz."
+            "W indeksie: $existing zdjęć. PhotoMind sprawdzi nowe zdjęcia automatycznie."
         } else {
-            "Indeks jest pusty — kliknij „Indeksuj zdjęcia”."
+            "Indeks jest pusty. PhotoMind uruchomi indeksowanie automatycznie po uzyskaniu dostępu."
         }
         updateAccessUi()
+        updateAiStatus()
 
         binding.indexButton.setOnClickListener {
             if (isIndexing) {
@@ -83,7 +85,9 @@ class MainActivity : AppCompatActivity() {
                 ensurePermissionAndIndex()
             }
         }
-
+        binding.peopleButton.setOnClickListener {
+            startActivity(Intent(this, PeopleActivity::class.java))
+        }
         binding.searchButton.setOnClickListener { performSearch() }
         binding.searchInput.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_SEARCH) {
@@ -93,6 +97,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (existing > 0 && galleryAccess() != GalleryAccess.NONE) performSearch()
+
+        // Core UX: no manual "index" step. Opening PhotoMind refreshes the fast local index.
+        binding.root.post {
+            if (!destroyed && galleryAccess() != GalleryAccess.NONE && !automaticIndexStarted) {
+                automaticIndexStarted = true
+                startIndexing(automatic = true)
+            }
+        }
     }
 
     private fun applySystemBarInsets() {
@@ -101,15 +113,9 @@ class MainActivity : AppCompatActivity() {
         val baseTop = root.paddingTop
         val baseRight = root.paddingRight
         val baseBottom = root.paddingBottom
-
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            view.setPadding(
-                baseLeft + bars.left,
-                baseTop + bars.top,
-                baseRight + bars.right,
-                baseBottom + bars.bottom
-            )
+            view.setPadding(baseLeft + bars.left, baseTop + bars.top, baseRight + bars.right, baseBottom + bars.bottom)
             insets
         }
         ViewCompat.requestApplyInsets(root)
@@ -117,12 +123,16 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (::binding.isInitialized && ::repository.isInitialized) updateAccessUi()
+        if (::binding.isInitialized && ::repository.isInitialized) {
+            updateAccessUi()
+            updateAiStatus()
+            if (!isIndexing && repository.indexedCount() > 0) startSceneEnrichment()
+        }
     }
 
     private fun ensurePermissionAndIndex() {
         when (galleryAccess()) {
-            GalleryAccess.FULL -> startIndexing()
+            GalleryAccess.FULL -> startIndexing(automatic = false)
             GalleryAccess.PARTIAL -> showPartialAccessDialog()
             GalleryAccess.NONE -> requestGalleryAccessAndIndex()
         }
@@ -133,14 +143,10 @@ class MainActivity : AppCompatActivity() {
             .setTitle("Masz ograniczony dostęp")
             .setMessage(
                 "PhotoMind widzi tylko zdjęcia wybrane w systemowym oknie Androida. " +
-                    "Możesz dodać kolejne zdjęcia, zmienić wybór albo zaindeksować tylko obecnie udostępnione."
+                    "Możesz dodać kolejne zdjęcia albo odświeżyć automatyczny indeks dla obecnego wyboru."
             )
-            .setPositiveButton("Dodaj / zmień zdjęcia") { _, _ ->
-                requestGalleryAccessAndIndex()
-            }
-            .setNeutralButton("Indeksuj wybrane") { _, _ ->
-                startIndexing()
-            }
+            .setPositiveButton("Dodaj / zmień zdjęcia") { _, _ -> requestGalleryAccessAndIndex() }
+            .setNeutralButton("Odśwież wybrane") { _, _ -> startIndexing(automatic = false) }
             .setNegativeButton("Anuluj", null)
             .show()
     }
@@ -158,11 +164,7 @@ class MainActivity : AppCompatActivity() {
                     "Jeśli Android nie pokazuje już okna wyboru, zmień dostęp w ustawieniach aplikacji."
             )
             .setPositiveButton("Ustawienia aplikacji") { _, _ ->
-                val intent = Intent(
-                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    Uri.fromParts("package", packageName, null)
-                )
-                startActivity(intent)
+                startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null)))
             }
             .setNegativeButton("Zamknij", null)
             .show()
@@ -170,12 +172,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateAccessUi() {
         if (isIndexing || destroyed) return
-
         val count = repository.indexedCount()
         when (galleryAccess()) {
             GalleryAccess.FULL -> {
                 binding.accessText.text = "Dostęp do galerii: pełny"
-                binding.indexButton.text = if (count == 0) "Indeksuj zdjęcia" else "Odśwież indeks"
+                binding.indexButton.text = if (count == 0) "Indeksuj teraz" else "Odśwież teraz"
             }
             GalleryAccess.PARTIAL -> {
                 binding.accessText.text = "Dostęp do galerii: ograniczony — tylko wybrane zdjęcia"
@@ -189,12 +190,27 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun startIndexing() {
+    private fun updateAiStatus() {
+        if (destroyed || !::repository.isInitialized) return
+        val (done, total) = repository.sceneProgress()
+        binding.aiStatusText.text = when {
+            total == 0 -> "AI: scenerie i osoby będą rozpoznawane automatycznie podczas indeksowania."
+            done >= total -> "AI: scenerie opisane $done/$total • osoby grupowane lokalnie"
+            else -> "AI: scenerie $done/$total • osoby grupowane lokalnie • wzbogacanie trwa automatycznie"
+        }
+    }
+
+    private fun startIndexing(automatic: Boolean) {
         if (isIndexing || destroyed || galleryAccess() == GalleryAccess.NONE) return
         isIndexing = true
         binding.indexButton.text = "Zatrzymaj"
         binding.progress.visibility = View.VISIBLE
         binding.progress.isIndeterminate = true
+        binding.statusText.text = if (automatic) {
+            "Automatycznie sprawdzam galerię i analizuję nowe zdjęcia…"
+        } else {
+            "Odświeżam indeks…"
+        }
 
         repository.indexAll(object : PhotoRepository.IndexCallback {
             override fun onStarted(total: Int) = runOnUiThread {
@@ -202,11 +218,6 @@ class MainActivity : AppCompatActivity() {
                 binding.progress.isIndeterminate = false
                 binding.progress.max = total.coerceAtLeast(1)
                 binding.progress.progress = 0
-                binding.statusText.text = if (total == 0) {
-                    "Android nie udostępnia obecnie żadnych zdjęć."
-                } else {
-                    "Indeksuję $total zdjęć lokalnie…"
-                }
             }
 
             override fun onProgress(
@@ -221,8 +232,8 @@ class MainActivity : AppCompatActivity() {
                 binding.progress.max = total.coerceAtLeast(1)
                 binding.progress.progress = done
                 binding.statusText.text = buildString {
-                    append("$done / $total • zapisane: $indexed • bez zmian: $skipped")
-                    if (aiProblems > 0) append(" • AI problemy: $aiProblems")
+                    append("$done / $total • nowe/odświeżone: $indexed • bez zmian: $skipped")
+                    if (aiProblems > 0) append(" • do ponowienia AI: $aiProblems")
                     if (saveFailed > 0) append(" • błędy zapisu: $saveFailed")
                 }
             }
@@ -233,23 +244,43 @@ class MainActivity : AppCompatActivity() {
                 binding.progress.visibility = View.GONE
                 updateAccessUi()
                 val count = repository.indexedCount()
-
                 binding.statusText.text = when {
                     summary.errorMessage != null -> "Błąd indeksowania: ${summary.errorMessage}"
-                    summary.cancelled ->
-                        "Indeksowanie zatrzymane. W indeksie: $count zdjęć."
-                    summary.saveFailed > 0 ->
-                        "W indeksie: $count zdjęć. Nie udało się zapisać ${summary.saveFailed} pozycji."
-                    summary.aiProblems > 0 -> {
-                        val reason = summary.firstAiError?.let { " Pierwszy błąd: $it" }.orEmpty()
-                        "W indeksie: $count zdjęć. AI wymaga ponowienia dla ${summary.aiProblems} zdjęć.$reason"
-                    }
-                    galleryAccess() == GalleryAccess.PARTIAL ->
-                        "Gotowe. W indeksie: $count zdjęć. Dostęp jest ograniczony do wybranych zdjęć."
-                    else ->
-                        "Gotowe. W indeksie: $count zdjęć."
+                    summary.cancelled -> "Indeksowanie zatrzymane. W indeksie: $count zdjęć."
+                    summary.saveFailed > 0 -> "W indeksie: $count zdjęć. Błędy zapisu: ${summary.saveFailed}."
+                    summary.aiProblems > 0 ->
+                        "W indeksie: $count zdjęć. Część twarzy/analiz zostanie automatycznie ponowiona później."
+                    automatic -> "Indeks aktualny: $count zdjęć."
+                    else -> "Gotowe. W indeksie: $count zdjęć."
                 }
                 refreshRecentGridPreservingStatus()
+                updateAiStatus()
+                if (!summary.cancelled) startSceneEnrichment()
+            }
+        })
+    }
+
+    private fun startSceneEnrichment() {
+        if (sceneEnriching || destroyed || isIndexing || repository.indexedCount() == 0) return
+        sceneEnriching = true
+        repository.enrichScenes(60, object : PhotoRepository.SceneCallback {
+            override fun onProgress(done: Int, globalDone: Int, globalTotal: Int) = runOnUiThread {
+                if (destroyed) return@runOnUiThread
+                binding.aiStatusText.text = "AI: opisuję scenerie $globalDone/$globalTotal • osoby grupowane lokalnie"
+            }
+
+            override fun onFinished(summary: PhotoRepository.SceneSummary) = runOnUiThread {
+                if (destroyed) return@runOnUiThread
+                sceneEnriching = false
+                updateAiStatus()
+                when {
+                    !summary.supported ->
+                        binding.aiStatusText.text = "AI: Gemini Nano do opisu scenerii niedostępny; podstawowe etykiety nadal działają."
+                    summary.retryLater ->
+                        binding.aiStatusText.text = "AI: scenerie ${summary.totalDone}/${summary.totalPhotos} • limit chwilowy, wznowię automatycznie później."
+                    summary.totalDone < summary.totalPhotos && summary.described > 0 ->
+                        binding.root.postDelayed({ if (!destroyed) startSceneEnrichment() }, 1500L)
+                }
             }
         })
     }
@@ -257,18 +288,13 @@ class MainActivity : AppCompatActivity() {
     private fun refreshRecentGridPreservingStatus() {
         if (destroyed || repository.indexedCount() == 0) return
         repository.search("", null) { results ->
-            if (!destroyed) {
-                runOnUiThread {
-                    if (!destroyed) adapter.submit(results)
-                }
-            }
+            if (!destroyed) runOnUiThread { if (!destroyed) adapter.submit(results) }
         }
     }
 
     private fun performSearch() {
         if (destroyed) return
         val generation = ++searchGeneration
-
         if (galleryAccess() == GalleryAccess.NONE) {
             adapter.submit(emptyList())
             binding.statusText.text = "Najpierw nadaj PhotoMind dostęp do zdjęć."
@@ -278,18 +304,16 @@ class MainActivity : AppCompatActivity() {
         val query = binding.searchInput.text?.toString()?.trim().orEmpty()
         if (repository.indexedCount() == 0) {
             adapter.submit(emptyList())
-            binding.statusText.text = "Indeks jest pusty — kliknij „Indeksuj zdjęcia”."
+            binding.statusText.text = "Indeks jest jeszcze pusty — poczekaj na automatyczne indeksowanie."
             return
         }
 
         if (query.isBlank()) {
             repository.search("", null) { results ->
-                if (!destroyed) {
-                    runOnUiThread {
-                        if (!destroyed && generation == searchGeneration) {
-                            adapter.submit(results)
-                            binding.statusText.text = "Ostatnio dostępne: ${results.size} zdjęć."
-                        }
+                if (!destroyed) runOnUiThread {
+                    if (!destroyed && generation == searchGeneration) {
+                        adapter.submit(results)
+                        binding.statusText.text = "Ostatnio dostępne: ${results.size} zdjęć."
                     }
                 }
             }
@@ -299,26 +323,20 @@ class MainActivity : AppCompatActivity() {
         translator.translatePolishToEnglish(
             query = query,
             onPreparing = {
-                if (!destroyed) {
-                    runOnUiThread {
-                        if (!destroyed && generation == searchGeneration) {
-                            binding.statusText.text = "Szukam lokalnie… Przy pierwszym użyciu może zostać pobrany model PL→EN."
-                        }
-                    }
+                if (!destroyed) runOnUiThread {
+                    if (!destroyed && generation == searchGeneration) binding.statusText.text = "Szukam lokalnie…"
                 }
             },
             onResult = { translated ->
                 if (!destroyed && generation == searchGeneration) {
                     repository.search(query, translated) { results ->
-                        if (!destroyed) {
-                            runOnUiThread {
-                                if (!destroyed && generation == searchGeneration) {
-                                    adapter.submit(results)
-                                    binding.statusText.text = if (results.isEmpty()) {
-                                        "Brak wyników dla „$query”. Spróbuj prostszych słów albo dodaj własny tag."
-                                    } else {
-                                        "Znaleziono ${results.size} zdjęć dla „$query”. Najtrafniejsze są na początku."
-                                    }
+                        if (!destroyed) runOnUiThread {
+                            if (!destroyed && generation == searchGeneration) {
+                                adapter.submit(results)
+                                binding.statusText.text = if (results.isEmpty()) {
+                                    "Brak wyników dla „$query”. Automatyczny opis scenerii może jeszcze trwać."
+                                } else {
+                                    "Znaleziono ${results.size} zdjęć dla „$query”."
                                 }
                             }
                         }
@@ -331,22 +349,20 @@ class MainActivity : AppCompatActivity() {
     private fun showTagDialog(photo: PhotoItem) {
         val input = EditText(this).apply {
             setText(photo.userTags)
-            hint = "np. Maciek, Tadzio, działka, faktura"
+            hint = "np. działka, ulubione, faktura"
             setPadding(48, 20, 48, 20)
         }
         AlertDialog.Builder(this)
-            .setTitle("Dodaj imię lub własny tag")
-            .setMessage("Możesz wpisać kilka słów oddzielonych spacją lub przecinkiem. Własne tagi mają najwyższy priorytet wyszukiwania.")
+            .setTitle("Własny tag (opcjonalnie)")
+            .setMessage("Osoby nadajemy teraz w ekranie „Osoby”. Tutaj możesz dodać własne dodatkowe słowa.")
             .setView(input)
             .setNegativeButton("Anuluj", null)
             .setPositiveButton("Zapisz") { _, _ ->
                 repository.updateTags(photo, input.text.toString()) {
-                    if (!destroyed) {
-                        runOnUiThread {
-                            if (!destroyed) {
-                                adapter.itemChanged(photo)
-                                Toast.makeText(this, "Tag zapisany lokalnie", Toast.LENGTH_SHORT).show()
-                            }
+                    if (!destroyed) runOnUiThread {
+                        if (!destroyed) {
+                            adapter.itemChanged(photo)
+                            Toast.makeText(this, "Tag zapisany lokalnie", Toast.LENGTH_SHORT).show()
                         }
                     }
                 }
@@ -363,11 +379,7 @@ class MainActivity : AppCompatActivity() {
         try {
             startActivity(intent)
         } catch (_: Exception) {
-            Toast.makeText(
-                this,
-                "Nie udało się otworzyć zdjęcia. Sprawdź, czy PhotoMind nadal ma do niego dostęp.",
-                Toast.LENGTH_LONG
-            ).show()
+            Toast.makeText(this, "Nie udało się otworzyć zdjęcia.", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -381,35 +393,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun galleryAccess(): GalleryAccess = when {
-        Build.VERSION.SDK_INT >= 34 -> {
-            when {
-                ContextCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.READ_MEDIA_IMAGES
-                ) == PackageManager.PERMISSION_GRANTED -> GalleryAccess.FULL
-
-                ContextCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
-                ) == PackageManager.PERMISSION_GRANTED -> GalleryAccess.PARTIAL
-
-                else -> GalleryAccess.NONE
-            }
+        Build.VERSION.SDK_INT >= 34 -> when {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED -> GalleryAccess.FULL
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED -> GalleryAccess.PARTIAL
+            else -> GalleryAccess.NONE
         }
-        Build.VERSION.SDK_INT >= 33 -> {
-            if (ContextCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.READ_MEDIA_IMAGES
-                ) == PackageManager.PERMISSION_GRANTED
-            ) GalleryAccess.FULL else GalleryAccess.NONE
-        }
-        else -> {
-            if (ContextCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.READ_EXTERNAL_STORAGE
-                ) == PackageManager.PERMISSION_GRANTED
-            ) GalleryAccess.FULL else GalleryAccess.NONE
-        }
+        Build.VERSION.SDK_INT >= 33 -> if (
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
+        ) GalleryAccess.FULL else GalleryAccess.NONE
+        else -> if (
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        ) GalleryAccess.FULL else GalleryAccess.NONE
     }
 
     override fun onDestroy() {
