@@ -11,8 +11,8 @@ android {
         applicationId = "com.photomind.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.1.2"
+        versionCode = 4
+        versionName = "0.2.0"
     }
 
     buildFeatures {
@@ -32,6 +32,7 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.recyclerview:recyclerview:1.4.0")
     implementation("com.github.bumptech.glide:glide:4.16.0")
@@ -39,6 +40,10 @@ dependencies {
     implementation("com.google.mlkit:image-labeling:17.0.9")
     implementation("com.google.mlkit:text-recognition:16.0.1")
     implementation("com.google.mlkit:translate:17.0.3")
+    implementation("com.google.mlkit:face-detection:16.1.7")
+    implementation("com.google.mlkit:genai-image-description:1.0.0-beta1")
+
+    implementation("org.tensorflow:tensorflow-lite:2.14.0")
 
     testImplementation("junit:junit:4.13.2")
 }
