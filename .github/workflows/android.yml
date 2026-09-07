@@ -23,12 +23,18 @@ jobs:
         with:
           gradle-version: "8.10.2"
 
+      - name: Unit tests
+        run: gradle :app:testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Android lint
+        run: gradle :app:lintDebug --no-daemon --stacktrace
+
       - name: Build debug APK
         run: gradle :app:assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: PhotoMind-debug
+          name: PhotoMind-0.1.1-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
