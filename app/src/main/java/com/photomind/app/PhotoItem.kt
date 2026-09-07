@@ -9,5 +9,8 @@ data class PhotoItem(
     val dateModified: Long,
     val labels: String,
     val ocr: String,
-    var userTags: String
+    var userTags: String,
+    val sceneDescription: String = "",
+    val people: String = "",
+    val faceCount: Int = 0
 )
