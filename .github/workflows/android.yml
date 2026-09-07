@@ -23,6 +23,12 @@ jobs:
         with:
           gradle-version: "8.10.2"
 
+      - name: Keep a stable QA signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: photomind-debug-keystore-v1
+
       - name: Unit tests
         run: gradle :app:testDebugUnitTest --no-daemon --stacktrace
 
