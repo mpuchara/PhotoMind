@@ -1,22 +1,30 @@
 # PhotoMind
 
-PhotoMind is a privacy-first Android photo search app. It indexes the user's local gallery on-device and lets the user search with normal text.
+PhotoMind is a privacy-first Android photo search app. It builds a local AI index of the user's gallery and lets the user search with natural text such as `Maciek nad morzem`, `dzieci w lesie` or `zachód słońca`.
 
-## v0.1
+## v0.2 — automatic people + scenery
 
-- Reads the Android gallery through `MediaStore` (no photo copying).
-- On-device image labels with ML Kit.
-- On-device OCR with ML Kit Text Recognition.
-- Polish → English query translation with ML Kit Translation so Polish queries can match English image labels.
-- Search across AI labels, OCR, filenames, folders and user tags.
-- Long-press a photo to add a custom tag or person's name.
-- Local SQLite index.
-- Tap a result to open the original photo.
-- No server and no photo upload. Internet permission is only used to download the optional ML Kit translation model.
+- Automatically refreshes the local gallery index when the app opens.
+- Periodically refreshes the fast index while the phone is charging and the battery is not low.
+- Detects faces locally with ML Kit Face Detection.
+- Creates local FaceNet embeddings and groups recurring faces into person clusters.
+- The user names a person once in the **People / Osoby** screen; that name becomes searchable across photos assigned to the cluster.
+- Automatically enriches photos with local Gemini Nano Image Description on supported devices while PhotoMind is in the foreground.
+- Keeps the existing fast local layers: ML Kit image labels, OCR, filename/folder metadata and optional custom tags.
+- Search ranking prioritizes named people, then rich scene descriptions, then labels/OCR/metadata.
+- Photos and face embeddings are not uploaded to a PhotoMind server.
+
+### Why scene enrichment is progressive
+
+ML Kit GenAI / AICore restricts GenAI inference to foreground use and applies device/app resource quotas. PhotoMind therefore keeps the basic index automatic in the background, while richer Gemini Nano scene descriptions are progressively generated whenever the app is open.
+
+### Face model
+
+PhotoMind downloads the FaceNet TFLite model once to app-private storage when face embeddings are first needed. The model source is the Apache-2.0 project `shubham0204/FaceRecognition_With_FaceNet_Android` and the app uses compatible 160×160 input / 128D embedding preprocessing. The downloaded model is code/model data only; user photos are not sent to that source.
 
 ## Build
 
-Push to `main`. GitHub Actions builds `PhotoMind-debug` as an APK artifact.
+GitHub Actions runs unit tests, Android Lint and a debug APK build.
 
 Local build (Gradle 8.10.2 / Java 17):
 
@@ -24,9 +32,8 @@ Local build (Gradle 8.10.2 / Java 17):
 gradle :app:assembleDebug
 ```
 
-## Planned
+## Next
 
-- Face detection + local face embeddings and clustering, then name a person once per cluster.
-- Semantic image/text embeddings for natural-language retrieval beyond fixed labels.
-- Background incremental indexing with battery/thermal safeguards.
-- Date/location filters and duplicate/screenshot/document filters.
+- Improve face-cluster merge/split correction UI and show cropped face thumbnails instead of the whole representative photo.
+- Add semantic image/text embeddings for natural-language retrieval independent of generated captions.
+- Add date/location filters and duplicate/screenshot/document filters.
