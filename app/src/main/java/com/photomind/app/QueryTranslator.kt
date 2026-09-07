@@ -49,7 +49,11 @@ class QueryTranslator {
             Query: $query
         """.trimIndent()
 
-        val response = runBlocking { model.generateContent(prompt) }.text.orEmpty()
+        val response = runBlocking { model.generateContent(prompt) }
+            .candidates
+            .firstOrNull()
+            ?.text
+            .orEmpty()
         return parse(response, query)
     }
 
