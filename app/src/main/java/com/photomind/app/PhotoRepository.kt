@@ -17,9 +17,11 @@ class PhotoRepository(context: Context) {
     data class IndexSummary(
         val indexed: Int,
         val skipped: Int,
-        val failed: Int,
+        val aiProblems: Int,
+        val saveFailed: Int,
         val cancelled: Boolean,
-        val errorMessage: String? = null
+        val errorMessage: String? = null,
+        val firstAiError: String? = null
     )
 
     private data class MediaEntry(
@@ -32,7 +34,14 @@ class PhotoRepository(context: Context) {
 
     interface IndexCallback {
         fun onStarted(total: Int)
-        fun onProgress(done: Int, total: Int, indexed: Int, skipped: Int, failed: Int)
+        fun onProgress(
+            done: Int,
+            total: Int,
+            indexed: Int,
+            skipped: Int,
+            aiProblems: Int,
+            saveFailed: Int
+        )
         fun onFinished(summary: IndexSummary)
     }
 
@@ -41,8 +50,10 @@ class PhotoRepository(context: Context) {
         indexExecutor.execute {
             var indexed = 0
             var skipped = 0
-            var failed = 0
+            var aiProblems = 0
+            var saveFailed = 0
             var done = 0
+            var firstAiError: String? = null
 
             try {
                 val entries = readAccessibleMedia()
@@ -56,8 +67,23 @@ class PhotoRepository(context: Context) {
                     if (database.isUpToDate(entry.id, entry.dateModified)) {
                         skipped++
                     } else {
+                        val analysis = try {
+                            analyzer.analyze(uri)
+                        } catch (error: Exception) {
+                            PhotoAnalyzer.Analysis(
+                                labels = "",
+                                ocr = "",
+                                complete = false,
+                                error = compactError(error)
+                            )
+                        }
+
+                        if (!analysis.complete) {
+                            aiProblems++
+                            if (firstAiError == null) firstAiError = analysis.error ?: "Nieznany błąd analizy AI"
+                        }
+
                         try {
-                            val analysis = analyzer.analyze(uri)
                             database.upsert(
                                 PhotoItem(
                                     mediaId = entry.id,
@@ -69,29 +95,49 @@ class PhotoRepository(context: Context) {
                                     labels = analysis.labels,
                                     ocr = analysis.ocr,
                                     userTags = ""
-                                )
+                                ),
+                                analysisComplete = analysis.complete,
+                                analysisError = analysis.error
                             )
                             indexed++
                         } catch (_: Exception) {
-                            failed++
+                            saveFailed++
                         }
                     }
 
                     done++
                     if (done == entries.size || done % 5 == 0) {
-                        callback.onProgress(done, entries.size, indexed, skipped, failed)
+                        callback.onProgress(
+                            done,
+                            entries.size,
+                            indexed,
+                            skipped,
+                            aiProblems,
+                            saveFailed
+                        )
                     }
                 }
 
-                callback.onFinished(IndexSummary(indexed, skipped, failed, cancelled.get()))
+                callback.onFinished(
+                    IndexSummary(
+                        indexed = indexed,
+                        skipped = skipped,
+                        aiProblems = aiProblems,
+                        saveFailed = saveFailed,
+                        cancelled = cancelled.get(),
+                        firstAiError = firstAiError
+                    )
+                )
             } catch (security: SecurityException) {
                 callback.onFinished(
                     IndexSummary(
                         indexed = indexed,
                         skipped = skipped,
-                        failed = failed,
+                        aiProblems = aiProblems,
+                        saveFailed = saveFailed,
                         cancelled = false,
-                        errorMessage = "Android zmienił dostęp do zdjęć. Wybierz zdjęcia ponownie i uruchom indeksowanie."
+                        errorMessage = "Android zmienił dostęp do zdjęć. Wybierz zdjęcia ponownie i uruchom indeksowanie.",
+                        firstAiError = firstAiError
                     )
                 )
             } catch (error: Exception) {
@@ -99,13 +145,25 @@ class PhotoRepository(context: Context) {
                     IndexSummary(
                         indexed = indexed,
                         skipped = skipped,
-                        failed = failed,
+                        aiProblems = aiProblems,
+                        saveFailed = saveFailed,
                         cancelled = false,
-                        errorMessage = error.message ?: "Nie udało się odczytać galerii."
+                        errorMessage = error.message ?: "Nie udało się odczytać galerii.",
+                        firstAiError = firstAiError
                     )
                 )
             }
         }
+    }
+
+    private fun compactError(error: Throwable): String {
+        val type = error.javaClass.simpleName.ifBlank { "błąd" }
+        val message = error.message
+            ?.replace(Regex("\\s+"), " ")
+            ?.take(180)
+            ?.trim()
+            .orEmpty()
+        return if (message.isBlank()) type else "$type — $message"
     }
 
     private fun readAccessibleMedia(): List<MediaEntry> {
