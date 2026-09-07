@@ -4,9 +4,10 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
-import java.util.Locale
 
 class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
+
+    data class ScoredPhoto(val photo: PhotoItem, val score: Int)
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -20,14 +21,21 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                 date_modified INTEGER NOT NULL DEFAULT 0,
                 labels TEXT NOT NULL DEFAULT '',
                 ocr TEXT NOT NULL DEFAULT '',
-                user_tags TEXT NOT NULL DEFAULT ''
+                user_tags TEXT NOT NULL DEFAULT '',
+                available INTEGER NOT NULL DEFAULT 1
             )
             """.trimIndent()
         )
         db.execSQL("CREATE INDEX idx_photos_date ON photos(date_taken DESC)")
+        db.execSQL("CREATE INDEX idx_photos_available ON photos(available)")
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE photos ADD COLUMN available INTEGER NOT NULL DEFAULT 1")
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_photos_available ON photos(available)")
+        }
+    }
 
     fun isUpToDate(mediaId: Long, dateModified: Long): Boolean {
         readableDatabase.query(
@@ -44,6 +52,24 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         }
     }
 
+    fun syncAvailability(accessibleMediaIds: List<Long>) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.execSQL("UPDATE photos SET available = 0")
+            val statement = db.compileStatement("UPDATE photos SET available = 1 WHERE media_id = ?")
+            accessibleMediaIds.forEach { id ->
+                statement.clearBindings()
+                statement.bindLong(1, id)
+                statement.executeUpdateDelete()
+            }
+            statement.close()
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     fun upsert(photo: PhotoItem) {
         val existingTags = getUserTags(photo.mediaId)
         val values = ContentValues().apply {
@@ -56,6 +82,7 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             put("labels", photo.labels)
             put("ocr", photo.ocr)
             put("user_tags", existingTags.ifBlank { photo.userTags })
+            put("available", 1)
         }
         writableDatabase.insertWithOnConflict("photos", null, values, SQLiteDatabase.CONFLICT_REPLACE)
     }
@@ -81,40 +108,42 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
     }
 
     fun count(): Int {
-        readableDatabase.rawQuery("SELECT COUNT(*) FROM photos", null).use { cursor ->
+        readableDatabase.rawQuery("SELECT COUNT(*) FROM photos WHERE available = 1", null).use { cursor ->
             return if (cursor.moveToFirst()) cursor.getInt(0) else 0
         }
     }
 
     fun recent(limit: Int = 300): List<PhotoItem> = queryItems(
-        "SELECT * FROM photos ORDER BY date_taken DESC LIMIT ?",
+        "SELECT * FROM photos WHERE available = 1 ORDER BY date_taken DESC LIMIT ?",
         arrayOf(limit.toString())
     )
 
-    fun search(query: String, limit: Int = 300): List<PhotoItem> {
-        val tokens = query
-            .trim()
-            .lowercase(Locale.getDefault())
-            .split(Regex("\\s+"))
-            .map { it.trim().trim(',', '.', ';', ':', '!', '?', '"', '\'', '(', ')') }
-            .filter { it.length >= 2 }
-            .distinct()
+    fun searchScored(query: String, limit: Int = 300): List<ScoredPhoto> {
+        val tokens = SearchText.tokens(query)
+        if (tokens.isEmpty()) return recent(limit).map { ScoredPhoto(it, 0) }
 
-        if (tokens.isEmpty()) return recent(limit)
-
-        val where = tokens.joinToString(" AND ") {
+        val where = tokens.joinToString(" OR ") {
             "(LOWER(labels) LIKE ? OR LOWER(ocr) LIKE ? OR LOWER(display_name) LIKE ? OR LOWER(bucket) LIKE ? OR LOWER(user_tags) LIKE ?)"
         }
         val args = mutableListOf<String>()
         tokens.forEach { token ->
             repeat(5) { args += "%$token%" }
         }
-        args += limit.toString()
+        args += MAX_CANDIDATES.toString()
 
-        return queryItems(
-            "SELECT * FROM photos WHERE $where ORDER BY date_taken DESC LIMIT ?",
+        val candidates = queryItems(
+            "SELECT * FROM photos WHERE available = 1 AND ($where) ORDER BY date_taken DESC LIMIT ?",
             args.toTypedArray()
         )
+
+        return candidates
+            .map { ScoredPhoto(it, SearchText.score(it, tokens)) }
+            .filter { it.score > 0 }
+            .sortedWith(
+                compareByDescending<ScoredPhoto> { it.score }
+                    .thenByDescending { it.photo.dateTaken }
+            )
+            .take(limit)
     }
 
     private fun queryItems(sql: String, args: Array<String>): List<PhotoItem> {
@@ -148,6 +177,7 @@ class PhotoDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
 
     companion object {
         private const val DB_NAME = "photomind.db"
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 2
+        private const val MAX_CANDIDATES = 1500
     }
 }
