@@ -21,7 +21,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="2dp"
-        android:text="Znajdź zdjęcie, opisując je słowami. Zdjęcia zostają na telefonie."
+        android:text="Znajdź zdjęcie, opisując osobę, miejsce albo sytuację. Analiza zostaje na telefonie."
         android:textAppearance="@style/TextAppearance.Material3.BodyMedium" />
 
     <TextView
@@ -32,14 +32,22 @@
         android:text="Dostęp do galerii: sprawdzam…"
         android:textAppearance="@style/TextAppearance.Material3.LabelMedium" />
 
+    <TextView
+        android:id="@+id/aiStatusText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="3dp"
+        android:text="AI: przygotowuję automatyczny indeks…"
+        android:textAppearance="@style/TextAppearance.Material3.LabelMedium" />
+
     <com.google.android.material.textfield.TextInputLayout
         android:id="@+id/searchLayout"
         style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="14dp"
+        android:layout_marginTop="12dp"
         android:hint="Czego szukasz?"
-        app:placeholderText="@string/search_hint">
+        app:placeholderText="np. Maciek nad morzem, dzieci w lesie, zachód słońca…">
 
         <com.google.android.material.textfield.TextInputEditText
             android:id="@+id/searchInput"
@@ -68,11 +76,23 @@
             android:layout_height="1dp" />
 
         <com.google.android.material.button.MaterialButton
+            android:id="@+id/peopleButton"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="0.8"
+            android:text="Osoby" />
+
+        <Space
+            android:layout_width="8dp"
+            android:layout_height="1dp" />
+
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/indexButton"
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_weight="1.25"
+            android:layout_weight="1.2"
             android:text="@string/index_photos" />
     </LinearLayout>
 
@@ -89,14 +109,14 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="7dp"
-        android:text="Najpierw zezwól na dostęp i uruchom indeksowanie."
+        android:text="PhotoMind automatycznie odświeża indeks po uruchomieniu."
         android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
 
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="4dp"
-        android:text="Wskazówka: przytrzymaj zdjęcie, aby nadać własny tag lub imię osoby."
+        android:text="Osoby są grupowane automatycznie. W „Osoby” nadajesz imię raz całemu klastrowi twarzy."
         android:textAppearance="@style/TextAppearance.Material3.LabelSmall" />
 
     <androidx.recyclerview.widget.RecyclerView
