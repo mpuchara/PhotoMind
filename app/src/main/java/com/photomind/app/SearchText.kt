@@ -16,12 +16,14 @@ object SearchText {
     )
 
     fun tokens(query: String): List<String> {
-        val normalized = fold(query)
-        return normalized
-            .split(Regex("[^\\p{L}\\p{N}]+"))
-            .map { it.trim() }
-            .filter { it.length >= 2 }
+        return splitTokens(fold(query))
             .filterNot { it in stopWords }
+            .distinct()
+    }
+
+    fun rawTokens(query: String): List<String> {
+        return splitTokens(query.lowercase(Locale.ROOT))
+            .filterNot { fold(it) in stopWords }
             .distinct()
     }
 
@@ -75,9 +77,17 @@ object SearchText {
 
     fun fold(value: String): String {
         val lower = value.lowercase(Locale.ROOT)
+            .replace('ł', 'l')
+            .replace('đ', 'd')
+            .replace('ø', 'o')
         return Normalizer.normalize(lower, Normalizer.Form.NFD)
             .replace(Regex("\\p{M}+"), "")
     }
+
+    private fun splitTokens(value: String): List<String> = value
+        .split(Regex("[^\\p{L}\\p{N}]+"))
+        .map { it.trim() }
+        .filter { it.length >= 2 }
 
     private fun containsTokenish(haystack: String, token: String): Boolean {
         if (haystack.isBlank()) return false
